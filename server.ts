@@ -50,7 +50,7 @@ interface MirrorNodeConfig {
 }
 
 const SERVER_NODES: MirrorNodeConfig[] = [
-  { id: 'node-moviebox', name: 'MovieBox HD', region: 'Global 4K/1080p Hub', origin: 'https://movieboxhd.net' },
+  { id: 'node-moviebox', name: 'MovieBox HD', region: 'movie-box.co 4K/1080p API', origin: 'https://movie-box.co' },
   { id: 'node-alpha', name: 'Node Alpha', region: 'BD-Fast Edge', origin: 'https://cmyyhb.movielinkbd.at' },
   { id: 'node-beta', name: 'Node Beta', region: 'SG-Ultra CDN', origin: 'https://4yer8f.movielinkbd.at' },
   { id: 'node-gamma', name: 'Node Gamma', region: 'Global Stream', origin: 'https://movielinkbd.tv' },
@@ -60,8 +60,10 @@ const SERVER_NODES: MirrorNodeConfig[] = [
 
 const PRIMARY_MIRROR_NODES = SERVER_NODES.filter((n) => n.id !== 'node-myflix' && n.id !== 'node-moviebox');
 const MYFLIX_ORIGIN = 'https://myflixbd.to';
-const MOVIEBOX_ORIGIN = 'https://movieboxhd.net';
-const MOVIEBOX_API_ORIGIN = 'https://h5-api.aoneroom.com';
+const MOVIEBOX_ORIGIN = 'https://movie-box.co';
+const MOVIEBOX_BACKUP_ORIGIN = 'https://movieboxhd.net';
+const MOVIEBOX_API_ORIGIN = 'https://movie-box.co';
+const MOVIEBOX_FALLBACK_API_ORIGIN = 'https://h5-api.aoneroom.com';
 
 interface CacheEntry<T> {
   data: T;
@@ -84,13 +86,16 @@ function sortSourcesFastestFirst(sources?: StreamSource[]): StreamSource[] {
     const isMovieBox =
       src.id?.startsWith('mb-') || /\/api\/mb-stream|\/api\/mb-ep-stream/i.test(src.url || '');
     if (isMovieBox) {
-      // If it has a direct macdn fallback (&fb=), score higher; otherwise place after primary direct R2/fsldownload streams
-      const hasMacdnFallback = /[?&]fb=[^&]+/.test(src.url || '');
-      const baseMb = hasMacdnFallback ? 1900 : 1200;
-      if (src.quality === 720) return baseMb + 80;
-      if (src.quality >= 360 && src.quality <= 576) return baseMb + 60;
-      if (src.quality === 1080) return baseMb + 40;
-      return baseMb;
+      // movie-box.co direct H.264 MP4 streams always get highest priority for instant native <video> playback
+      const baseMb = 4500;
+      const sizeMatch = (src.name || '').match(/(\d+)\s*MB/i);
+      const sizeMb = sizeMatch ? parseInt(sizeMatch[1], 10) : 0;
+      const isHeavyFile = sizeMb > 350;
+      if (src.quality === 720) return baseMb + 140;
+      if (src.quality === 480) return baseMb + 135;
+      if (src.quality === 360) return baseMb + 125;
+      if (src.quality === 1080) return isHeavyFile ? baseMb + 80 : baseMb + 130;
+      return baseMb + 100;
     }
     const isHevc = /\b(hevc|h\.?265|x265|10bit|av1)\b/i.test(`${src.name} ${src.qualityLabel}`);
     const isBestHeavy = /best\s*quality/i.test(src.qualityLabel || '');
@@ -1204,39 +1209,114 @@ function parseMyFlixDetail(html: string, itemPath: string): MovieDetailData {
 }
 
 // ============================================================================
-// MovieBox HD (movieboxhd.net / h5-api.aoneroom.com) Full Content Engine
+// MovieBox HD (https://movie-box.co + movieboxhd.net + h5-api.aoneroom.com) Full Content Engine
 // ============================================================================
 let cachedMovieBoxToken = '';
 let cachedMovieBoxTokenExpiresAt = 0;
+let cachedMovieBoxHomeSections: Array<{ title: string; type: string; subjects: any[] }> = [];
+let cachedMovieBoxHomeExpiresAt = 0;
 
 async function getMovieBoxBearerToken(): Promise<string> {
-  if (cachedMovieBoxToken && cachedMovieBoxTokenExpiresAt > Date.now()) {
+  if (
+    cachedMovieBoxToken &&
+    cachedMovieBoxTokenExpiresAt > Date.now() &&
+    cachedMovieBoxHomeSections.length > 0 &&
+    cachedMovieBoxHomeExpiresAt > Date.now()
+  ) {
     return cachedMovieBoxToken;
   }
-  try {
-    const res = await fetch(`${MOVIEBOX_API_ORIGIN}/wefeed-h5api-bff/home?host=movieboxhd.net`, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-        Accept: 'application/json',
-        'X-Client-Info': JSON.stringify({ timezone: 'Asia/Dhaka' }),
-        'X-Request-Lang': 'en',
-      },
-      signal: AbortSignal.timeout(4500),
-    });
-    const xUser = res.headers.get('x-user');
-    if (xUser) {
-      const parsed = JSON.parse(xUser);
-      if (parsed?.token) {
-        cachedMovieBoxToken = String(parsed.token);
-        cachedMovieBoxTokenExpiresAt = Date.now() + 6 * 3600_000;
-        return cachedMovieBoxToken;
+  const homeEndpoints = [
+    `${MOVIEBOX_ORIGIN}/wefeed-h5api-bff/home?host=movie-box.co`,
+    `${MOVIEBOX_FALLBACK_API_ORIGIN}/wefeed-h5api-bff/home?host=movie-box.co`,
+    `${MOVIEBOX_FALLBACK_API_ORIGIN}/wefeed-h5api-bff/home?host=movieboxhd.net`,
+  ];
+  for (const endpoint of homeEndpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+          Accept: 'application/json',
+          Referer: 'https://movie-box.co/?utm_source=mb_app_inner_btmtip',
+          'X-Client-Info': JSON.stringify({ timezone: 'Asia/Dhaka' }),
+          'X-Request-Lang': 'en',
+        },
+        signal: AbortSignal.timeout(4500),
+      });
+      const xUser = res.headers.get('x-user');
+      if (xUser) {
+        try {
+          const parsed = JSON.parse(xUser);
+          if (parsed?.token) {
+            cachedMovieBoxToken = String(parsed.token);
+            cachedMovieBoxTokenExpiresAt = Date.now() + 6 * 3600_000;
+          }
+        } catch {
+          // ignore
+        }
       }
+      if (res.ok) {
+        const json = (await res.json().catch(() => null)) as any;
+        const ops = Array.isArray(json?.data?.operatingList) ? json.data.operatingList : [];
+        if (ops.length > 0) {
+          cachedMovieBoxHomeSections = ops
+            .map((op: any) => ({
+              title: String(op?.title || ''),
+              type: String(op?.type || ''),
+              subjects: Array.isArray(op?.subjects)
+                ? op.subjects
+                : Array.isArray(op?.banner?.items)
+                  ? op.banner.items
+                  : [],
+            }))
+            .filter((s: { subjects: any[] }) => s.subjects.length > 0);
+          cachedMovieBoxHomeExpiresAt = Date.now() + 180_000;
+        }
+        if (cachedMovieBoxToken) return cachedMovieBoxToken;
+      }
+    } catch {
+      // try next MovieBox gateway
     }
-  } catch {
-    // ignore token bootstrap error
   }
   return cachedMovieBoxToken;
+}
+
+function getMovieBoxHomeOperatingSubjects(rawPath: string): any[] {
+  if (!cachedMovieBoxHomeSections.length) return [];
+  const p = (rawPath || '/').toLowerCase().replace(/\/page\/\d+\/?$/, '').replace(/\/+$/, '') || '/';
+  const matched: any[] = [];
+
+  for (const sec of cachedMovieBoxHomeSections) {
+    const t = sec.title.toLowerCase();
+    const isMatch =
+      p === '/' ||
+      p === '/hot-dhamaka' ||
+      p === '/new-uploads' ||
+      p === '/new-releases' ||
+      p === '/mostwatch/7d' ||
+      p === '/movies' ||
+      (p.includes('anime') && (t.includes('anime') || t.includes('animation'))) ||
+      (p.includes('animation') && t.includes('animation')) ||
+      ((p.includes('drama') || p.includes('korean')) && (t.includes('k-drama') || t.includes('drama') || t.includes('romance'))) ||
+      (p.includes('chinese') && t.includes('c-drama')) ||
+      ((p.includes('series') || p.includes('ongoing') || p.includes('tv')) &&
+        (t.includes('series') || t.includes('shows') || t.includes('short tv') || t.includes('drama'))) ||
+      ((p.includes('action') || p.includes('superhero')) &&
+        (t.includes('action') || t.includes('superhero') || t.includes('gangster'))) ||
+      ((p.includes('thriller') || p.includes('crime')) &&
+        (t.includes('thriller') || t.includes('gangster') || t.includes('action'))) ||
+      (p.includes('horror') && t.includes('horror')) ||
+      (p.includes('romance') && t.includes('romance')) ||
+      (p.includes('comedy') && t.includes('comedy')) ||
+      ((p.includes('fantasy') || p.includes('sci-fi') || p.includes('adventure')) &&
+        (t.includes('fantasy') || t.includes('superhero'))) ||
+      (p.includes('upcoming') && t.includes('coming soon'));
+
+    if (isMatch) {
+      matched.push(...sec.subjects);
+    }
+  }
+  return matched;
 }
 
 function mapCategoryToMovieBoxFilter(rawPath: string, page = 1): Record<string, any> {
@@ -1502,35 +1582,65 @@ async function fetchMovieBoxCatalog(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
     'X-Client-Info': JSON.stringify({ timezone: 'Asia/Dhaka' }),
     'X-Request-Lang': 'en',
-    Referer: `${MOVIEBOX_ORIGIN}/`,
+    Referer: 'https://movie-box.co/?utm_source=mb_app_inner_btmtip',
   };
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
 
   if (search) {
-    const res = await fetch(`${MOVIEBOX_API_ORIGIN}/wefeed-h5api-bff/subject/search`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        keyword: search,
-        page,
-        perPage: 28,
-        subjectType: 0,
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) throw new Error(`MovieBox search HTTP ${res.status}`);
-    const json = (await res.json()) as any;
-    const rawItems = Array.isArray(json?.data?.items) ? json.data.items : [];
-    const cards = rawItems
-      .map((it: any, idx: number) => mapMovieBoxItemToCard(it, idx))
-      .filter(Boolean) as MovieCardItem[];
+    const searchEndpoints = [
+      `${MOVIEBOX_API_ORIGIN}/wefeed-h5api-bff/subject/search`,
+      `${MOVIEBOX_FALLBACK_API_ORIGIN}/wefeed-h5api-bff/subject/search`,
+    ];
+    let rawItems: any[] = [];
+    for (const ep of searchEndpoints) {
+      try {
+        const res = await fetch(ep, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            keyword: search,
+            page,
+            perPage: 28,
+            subjectType: 0,
+          }),
+          signal: AbortSignal.timeout(4800),
+        });
+        if (res.ok) {
+          const json = (await res.json()) as any;
+          if (Array.isArray(json?.data?.items) && json.data.items.length > 0) {
+            rawItems = json.data.items;
+            break;
+          }
+        }
+      } catch {
+        // try fallback gateway
+      }
+    }
+    const lowerQ = search.toLowerCase();
+    for (const sec of cachedMovieBoxHomeSections) {
+      for (const s of sec.subjects) {
+        if (String(s?.title || '').toLowerCase().includes(lowerQ)) {
+          rawItems.push(s);
+        }
+      }
+    }
+    const seenSearchIds = new Set<string>();
+    const cards: MovieCardItem[] = [];
+    for (let idx = 0; idx < rawItems.length; idx++) {
+      const it = rawItems[idx];
+      const sid = String(it?.subjectId || '');
+      if (!sid || seenSearchIds.has(sid)) continue;
+      seenSearchIds.add(sid);
+      const card = mapMovieBoxItemToCard(it, idx);
+      if (card) cards.push(card);
+    }
     return { items: cards, maxPage: 50 };
   }
 
   // Fetch BOTH Latest Uploads AND Hottest/All-Time across Movies (channelId 1), Series (channelId 2), and Anime (channelId 1006)
-  // so 100% of newly uploaded, current, and previous MovieBox HD content comes in!
+  // plus curated operatingList sections directly from https://movie-box.co!
   const filterPayload: Record<string, any> = { ...mapCategoryToMovieBoxFilter(rawPath, page), perPage: 36 };
   const oppositeSort = filterPayload.sort === 'Latest' ? 'Hottest' : 'Latest';
   const requests: Promise<Response>[] = [
@@ -1538,13 +1648,13 @@ async function fetchMovieBoxCatalog(
       method: 'POST',
       headers,
       body: JSON.stringify(filterPayload),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(4800),
     }),
     fetch(`${MOVIEBOX_API_ORIGIN}/wefeed-h5api-bff/subject/filter`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ ...filterPayload, sort: oppositeSort }),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(4800),
     }),
   ];
 
@@ -1555,13 +1665,13 @@ async function fetchMovieBoxCatalog(
         method: 'POST',
         headers,
         body: JSON.stringify({ ...filterPayload, channelId: 2, sort: 'Latest' }),
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(4800),
       }),
       fetch(`${MOVIEBOX_API_ORIGIN}/wefeed-h5api-bff/subject/filter`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ ...filterPayload, channelId: 2, sort: 'Hottest' }),
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(4800),
       })
     );
   }
@@ -1577,6 +1687,9 @@ async function fetchMovieBoxCatalog(
 
   const settled = await Promise.allSettled(requests);
   const combinedRaw: any[] = [];
+  if (page === 1) {
+    combinedRaw.push(...getMovieBoxHomeOperatingSubjects(rawPath));
+  }
   let maxPage = 2500;
   for (const r of settled) {
     if (r.status === 'fulfilled' && r.value.ok) {
@@ -1745,6 +1858,11 @@ function buildEmbedBackupSources(
   ];
 }
 
+const mbPlayStreamCache = new Map<
+  string,
+  { sources: StreamSource[]; buttons: DirectDownloadButton[]; expiresAt: number }
+>();
+
 async function fetchMovieBoxPlayStreams(
   subjectId: string,
   detailPath: string,
@@ -1754,25 +1872,44 @@ async function fetchMovieBoxPlayStreams(
   language: string,
   fallbackVideoUrl = ''
 ): Promise<{ sources: StreamSource[]; buttons: DirectDownloadButton[] }> {
+  const playCacheKey = `${subjectId}::s${seasonNum}::e${epNum}`;
+  const cachedPlay = mbPlayStreamCache.get(playCacheKey);
+  if (cachedPlay && cachedPlay.expiresAt > Date.now() && cachedPlay.sources.length > 0) {
+    return { sources: cachedPlay.sources, buttons: cachedPlay.buttons };
+  }
+
   const token = await getMovieBoxBearerToken();
-  const playUrl = `${MOVIEBOX_ORIGIN}/wefeed-h5api-bff/subject/play?subjectId=${encodeURIComponent(
-    subjectId
-  )}&se=${seasonNum}&ep=${epNum}&detailPath=${encodeURIComponent(detailPath)}&streamSignType=1`;
+  const playOrigins = [MOVIEBOX_ORIGIN, MOVIEBOX_BACKUP_ORIGIN];
+  let streams: any[] = [];
 
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-    Referer: `${MOVIEBOX_ORIGIN}/play/${detailPath}?id=${subjectId}`,
-    'X-Client-Info': JSON.stringify({ timezone: 'Asia/Dhaka' }),
-    'X-Request-Lang': 'en',
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
+  for (const origin of playOrigins) {
+    try {
+      const playUrl = `${origin}/wefeed-h5api-bff/subject/play?subjectId=${encodeURIComponent(
+        subjectId
+      )}&se=${seasonNum}&ep=${epNum}&detailPath=${encodeURIComponent(detailPath)}&streamSignType=1`;
 
-  const res = await fetch(playUrl, { headers, signal: AbortSignal.timeout(5500) });
-  if (!res.ok) return { sources: [], buttons: [] };
-  const json = (await res.json()) as any;
-  const streams = Array.isArray(json?.data?.streams) ? json.data.streams : [];
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        Referer: `${origin}/movies/${detailPath}?id=${subjectId}`,
+        'X-Client-Info': JSON.stringify({ timezone: 'Asia/Dhaka' }),
+        'X-Request-Lang': 'en',
+      };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const res = await fetch(playUrl, { headers, signal: AbortSignal.timeout(4200) });
+      if (res.ok) {
+        const json = (await res.json()) as any;
+        if (Array.isArray(json?.data?.streams) && json.data.streams.length > 0) {
+          streams = json.data.streams;
+          break;
+        }
+      }
+    } catch {
+      // try backup origin
+    }
+  }
 
   const sources: StreamSource[] = [];
   const buttons: DirectDownloadButton[] = [];
@@ -1812,8 +1949,26 @@ async function fetchMovieBoxPlayStreams(
     });
   }
 
-  sources.sort((a, b) => b.quality - a.quality);
+  sources.sort((a, b) => {
+    const rank = (s: StreamSource) => {
+      const szMatch = (s.name || '').match(/(\d+)\s*MB/i);
+      const szMb = szMatch ? parseInt(szMatch[1], 10) : 0;
+      if (s.quality === 720) return 100;
+      if (s.quality === 480) return 95;
+      if (s.quality === 360) return 90;
+      if (s.quality === 1080) return szMb > 350 ? 80 : 98;
+      return s.quality;
+    };
+    return rank(b) - rank(a);
+  });
   buttons.sort((a, b) => parseInt(b.quality, 10) - parseInt(a.quality, 10));
+  if (sources.length > 0) {
+    mbPlayStreamCache.set(playCacheKey, {
+      sources,
+      buttons,
+      expiresAt: Date.now() + 15 * 60_000,
+    });
+  }
   return { sources, buttons };
 }
 
@@ -1828,17 +1983,28 @@ async function fetchMovieBoxDetail(rawPath: string): Promise<MovieDetailData> {
     Accept: 'application/json',
     'User-Agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    Referer: 'https://movie-box.co/?utm_source=mb_app_inner_btmtip',
     'X-Client-Info': JSON.stringify({ timezone: 'Asia/Dhaka' }),
     'X-Request-Lang': 'en',
   };
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const detRes = await fetch(
-    `${MOVIEBOX_API_ORIGIN}/wefeed-h5api-bff/detail?subjectId=${encodeURIComponent(subjectId)}`,
-    { headers, signal: AbortSignal.timeout(5500) }
-  );
-  if (!detRes.ok) throw new Error(`MovieBox detail HTTP ${detRes.status}`);
-  const detJson = (await detRes.json()) as any;
+  let detJson: any = null;
+  for (const apiBase of [MOVIEBOX_API_ORIGIN, MOVIEBOX_FALLBACK_API_ORIGIN]) {
+    try {
+      const detRes = await fetch(
+        `${apiBase}/wefeed-h5api-bff/detail?subjectId=${encodeURIComponent(subjectId)}`,
+        { headers, signal: AbortSignal.timeout(4500) }
+      );
+      if (detRes.ok) {
+        detJson = await detRes.json();
+        if (detJson?.data?.subject) break;
+      }
+    } catch {
+      // try fallback gateway
+    }
+  }
+  if (!detJson?.data?.subject) throw new Error('MovieBox detail unavailable');
   const subject = detJson?.data?.subject || {};
   const resource = detJson?.data?.resource || {};
   const stars = Array.isArray(detJson?.data?.stars) ? detJson.data.stars : [];
@@ -1938,16 +2104,20 @@ async function fetchMovieBoxDetail(rawPath: string): Promise<MovieDetailData> {
     seasonsList.length === 0 ||
     (seasonsList.length === 1 && Number(seasonsList[0]?.se) === 0);
 
-  const imdbIdPromise = resolveImdbIdForTitle(title, releaseDate, !isMovieType);
   const episodes: EpisodeItem[] = [];
   let downloadButtons: DirectDownloadButton[] = [];
 
   if (isMovieType) {
     // Movie (se=0, ep=0, with fallback to se=1, ep=1 if stored as single episode)
-    let [{ sources, buttons }, imdbId] = await Promise.all([
-      fetchMovieBoxPlayStreams(subjectId, detailPath, 0, 0, title, language, trailerMp4Url),
-      imdbIdPromise,
-    ]);
+    let { sources, buttons } = await fetchMovieBoxPlayStreams(
+      subjectId,
+      detailPath,
+      0,
+      0,
+      title,
+      language,
+      trailerMp4Url
+    );
     if (sources.length === 0) {
       const fb = await fetchMovieBoxPlayStreams(
         subjectId,
@@ -1961,6 +2131,13 @@ async function fetchMovieBoxDetail(rawPath: string): Promise<MovieDetailData> {
       sources = fb.sources;
       buttons = fb.buttons;
     }
+    const imdbId =
+      sources.length === 0
+        ? await Promise.race([
+            resolveImdbIdForTitle(title, releaseDate, false),
+            new Promise<string>((r) => setTimeout(() => r(''), 300)),
+          ])
+        : '';
     const embedBackups = buildEmbedBackupSources(imdbId, 0, 0, title, language);
     const allMovieSources = [...sources, ...embedBackups];
     downloadButtons = buttons;
@@ -1977,7 +2154,7 @@ async function fetchMovieBoxDetail(rawPath: string): Promise<MovieDetailData> {
       });
     }
   } else {
-    // Series / Drama / Anime: Include 100% of ALL Seasons and ALL actual available Episodes (respecting sObj.allEp!)
+    // Series / Drama / Anime: Preload Episode 1 immediately for <150ms startup!
     const parseSeasonEpNums = (sObj: any): number[] => {
       const maxEp = Math.max(1, Number(sObj?.maxEp) || 1);
       const fromAllEp = String(sObj?.allEp || '')
@@ -1992,24 +2169,26 @@ async function fetchMovieBoxDetail(rawPath: string): Promise<MovieDetailData> {
     const firstSeason = seasonsList[0] || { se: 1, maxEp: 8 };
     const firstSeNum = Number(firstSeason.se) || 1;
     const firstSeasonEpNums = parseSeasonEpNums(firstSeason);
-    const preloadEpNums = firstSeasonEpNums.slice(0, 3);
+    const firstEpNum = firstSeasonEpNums[0] || 1;
 
     const preloadedMap = new Map<number, { sources: StreamSource[]; buttons: DirectDownloadButton[] }>();
-    const [imdbId] = await Promise.all([
-      imdbIdPromise,
-      ...preloadEpNums.map(async (epNum) => {
-        const res = await fetchMovieBoxPlayStreams(
-          subjectId,
-          detailPath,
-          firstSeNum,
-          epNum,
-          `${title} S${firstSeNum}E${epNum}`,
-          language,
-          trailerMp4Url
-        );
-        preloadedMap.set(epNum, res);
-      }),
-    ]);
+    const firstEpRes = await fetchMovieBoxPlayStreams(
+      subjectId,
+      detailPath,
+      firstSeNum,
+      firstEpNum,
+      `${title} S${firstSeNum}E${firstEpNum}`,
+      language,
+      trailerMp4Url
+    );
+    preloadedMap.set(firstEpNum, firstEpRes);
+    const imdbId =
+      firstEpRes.sources.length === 0
+        ? await Promise.race([
+            resolveImdbIdForTitle(title, releaseDate, true),
+            new Promise<string>((r) => setTimeout(() => r(''), 300)),
+          ])
+        : '';
 
     const fbParam = trailerMp4Url
       ? `&fb=${Buffer.from(trailerMp4Url, 'utf8').toString('base64url')}`
@@ -2457,28 +2636,25 @@ async function startServer() {
       }
       if (missingCards.length > 0) {
         void (async () => {
-          for (let i = 0; i < Math.min(missingCards.length, 9); i += 3) {
-            await Promise.allSettled(
-              missingCards.slice(i, i + 3).map(async (card) => {
-                if (findCachedDetailByPathOrTitle(card.path, card.title)) return;
-                try {
-                  if (card.path.startsWith('/mb/')) {
-                    const mbDet = await fetchMovieBoxDetail(card.path);
-                    if (mbDet && mbDet.episodes.length > 0) {
-                      storeDetailInCaches(card.path, mbDet, Date.now() + 3600_000);
-                    }
-                    return;
-                  }
-                  const { html, finalOrigin } = await fetchFromMirrors(card.path, warmNodeId);
-                  const det = parseMovieDetail(html, card.path, finalOrigin);
-                  if (det.episodes.length > 0) {
-                    storeDetailInCaches(card.path, det, Date.now() + 3600_000);
-                  }
-                } catch {
-                  // ignore
+          // Gently pre-warm only the top 3 cards sequentially so background warmup never competes with user clicks
+          for (const card of missingCards.slice(0, 3)) {
+            if (findCachedDetailByPathOrTitle(card.path, card.title)) continue;
+            try {
+              if (card.path.startsWith('/mb/')) {
+                const mbDet = await fetchMovieBoxDetail(card.path);
+                if (mbDet && mbDet.episodes.length > 0) {
+                  storeDetailInCaches(card.path, mbDet, Date.now() + 3600_000);
                 }
-              })
-            );
+              } else {
+                const { html, finalOrigin } = await fetchFromMirrors(card.path, warmNodeId);
+                const det = parseMovieDetail(html, card.path, finalOrigin);
+                if (det.episodes.length > 0) {
+                  storeDetailInCaches(card.path, det, Date.now() + 3600_000);
+                }
+              }
+            } catch {
+              // ignore
+            }
           }
         })();
       }
@@ -2810,111 +2986,127 @@ async function startServer() {
       try {
         let mbDetail = await fetchMovieBoxDetail(rawPath);
         if (mbDetail) {
-          // Always check MovieLinkBD & MyFlixBD in parallel so direct R2/fsldownload streams are placed FIRST!
-          const wantBase = extractBaseSeriesTitle(mbDetail.title).toLowerCase();
-          const norm = (s: string) => extractBaseSeriesTitle(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
-          const wantNorm = norm(mbDetail.title);
-          if (wantBase.length >= 2) {
-            const [primarySearchRes, mfSearchRes] = await Promise.allSettled([
-              fetchFromMirrors(`/search?q=${encodeURIComponent(wantBase)}`, nodeId),
-              fetchMyFlixHtml(`/?s=${encodeURIComponent(wantBase)}`, 2800),
-            ]);
+          const enrichMovieBoxWithBackups = async (baseMb: MovieDetailData): Promise<MovieDetailData> => {
+            const enriched: MovieDetailData = {
+              ...baseMb,
+              episodes: baseMb.episodes.map((e) => ({ ...e, sources: [...e.sources] })),
+              downloadButtons: [...baseMb.downloadButtons],
+            };
+            const wantBase = extractBaseSeriesTitle(enriched.title).toLowerCase();
+            const norm = (s: string) => extractBaseSeriesTitle(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+            const wantNorm = norm(enriched.title);
+            if (wantBase.length >= 2) {
+              const [primarySearchRes, mfSearchRes] = await Promise.allSettled([
+                fetchFromMirrors(`/search?q=${encodeURIComponent(wantBase)}`, nodeId),
+                fetchMyFlixHtml(`/?s=${encodeURIComponent(wantBase)}`, 2800),
+              ]);
 
-            if (primarySearchRes.status === 'fulfilled') {
-              try {
-                const { items } = parseMovieCards(primarySearchRes.value.html);
-                const matchedItem = items.find((it) => {
-                  const itBase = extractBaseSeriesTitle(it.title).toLowerCase();
-                  const itNorm = norm(it.title);
-                  return (
-                    itBase === wantBase ||
-                    (itNorm &&
+              if (primarySearchRes.status === 'fulfilled') {
+                try {
+                  const { items } = parseMovieCards(primarySearchRes.value.html);
+                  const matchedItem = items.find((it) => {
+                    const itBase = extractBaseSeriesTitle(it.title).toLowerCase();
+                    const itNorm = norm(it.title);
+                    return (
+                      itBase === wantBase ||
+                      (itNorm &&
+                        wantNorm &&
+                        (itNorm === wantNorm ||
+                          (itNorm.length >= 4 && wantNorm.includes(itNorm)) ||
+                          (wantNorm.length >= 4 && itNorm.includes(wantNorm))))
+                    );
+                  });
+                  if (matchedItem) {
+                    const primaryRes = await fetchFromMirrors(matchedItem.path, nodeId);
+                    const primaryDet = parseMovieDetail(primaryRes.html, rawPath, primaryRes.finalOrigin);
+                    if (primaryDet.episodes.length > 0) {
+                      if (enriched.episodes.length === 0) {
+                        enriched.episodes = primaryDet.episodes;
+                      } else {
+                        enriched.episodes = enriched.episodes.map((mbEp, idx) => {
+                          const matchedPEp =
+                            primaryDet.episodes.find(
+                              (pe) =>
+                                pe.number === mbEp.number &&
+                                (!mbEp.season || !pe.season || pe.season === mbEp.season)
+                            ) ||
+                            primaryDet.episodes.find((pe) => pe.number === mbEp.number) ||
+                            primaryDet.episodes[idx] ||
+                            primaryDet.episodes[0];
+                          return {
+                            ...mbEp,
+                            // Keep movie-box.co Direct H.264 MP4 streams FIRST, followed by MovieLinkBD backup streams!
+                            sources: [...mbEp.sources, ...(matchedPEp?.sources || [])],
+                          };
+                        });
+                      }
+                      enriched.downloadButtons = [
+                        ...enriched.downloadButtons,
+                        ...primaryDet.downloadButtons,
+                      ];
+                    }
+                  }
+                } catch {
+                  // ignore primary mirror enrichment error
+                }
+              }
+
+              if (mfSearchRes.status === 'fulfilled' && mfSearchRes.value) {
+                try {
+                  const mfCards = parseMyFlixCards(mfSearchRes.value).items;
+                  const matchedMf = mfCards.find((c) => {
+                    const cNorm = norm(c.title);
+                    return (
+                      cNorm &&
                       wantNorm &&
-                      (itNorm === wantNorm ||
-                        (itNorm.length >= 4 && wantNorm.includes(itNorm)) ||
-                        (wantNorm.length >= 4 && itNorm.includes(wantNorm))))
-                  );
-                });
-                if (matchedItem) {
-                  const primaryRes = await fetchFromMirrors(matchedItem.path, nodeId);
-                  const primaryDet = parseMovieDetail(primaryRes.html, rawPath, primaryRes.finalOrigin);
-                  if (primaryDet.episodes.length > 0) {
-                    if (mbDetail.episodes.length === 0) {
-                      mbDetail.episodes = primaryDet.episodes;
-                    } else {
-                      mbDetail.episodes = mbDetail.episodes.map((mbEp, idx) => {
-                        const matchedPEp =
-                          primaryDet.episodes.find(
-                            (pe) =>
-                              pe.number === mbEp.number &&
-                              (!mbEp.season || !pe.season || pe.season === mbEp.season)
-                          ) ||
-                          primaryDet.episodes.find((pe) => pe.number === mbEp.number) ||
-                          primaryDet.episodes[idx] ||
-                          primaryDet.episodes[0];
-                        return {
-                          ...mbEp,
-                          // Put working MovieLinkBD direct R2/fsldownload streams FIRST!
-                          sources: [...(matchedPEp?.sources || []), ...mbEp.sources],
-                        };
-                      });
+                      (cNorm === wantNorm ||
+                        (cNorm.length >= 4 && wantNorm.includes(cNorm)) ||
+                        (wantNorm.length >= 4 && cNorm.includes(wantNorm)))
+                    );
+                  });
+                  if (matchedMf) {
+                    const mfRealPath = matchedMf.path.replace(/^\/mf\//, '/');
+                    const mfDetailHtml = await fetchMyFlixHtml(`${mfRealPath}/`, 3000);
+                    const mfDet = parseMyFlixDetail(mfDetailHtml, rawPath);
+                    if (mfDet.episodes.length > 0) {
+                      if (enriched.episodes.length === 0) {
+                        enriched.episodes = mfDet.episodes;
+                      } else {
+                        enriched.episodes = enriched.episodes.map((mbEp, idx) => {
+                          const matchedMfEp =
+                            mfDet.episodes.find((me) => me.number === mbEp.number) ||
+                            mfDet.episodes[idx] ||
+                            mfDet.episodes[0];
+                          return {
+                            ...mbEp,
+                            sources: [...mbEp.sources, ...(matchedMfEp?.sources || [])],
+                          };
+                        });
+                      }
+                      enriched.downloadButtons = [
+                        ...enriched.downloadButtons,
+                        ...mfDet.downloadButtons,
+                      ];
                     }
-                    mbDetail.downloadButtons = [
-                      ...primaryDet.downloadButtons,
-                      ...mbDetail.downloadButtons,
-                    ];
                   }
+                } catch {
+                  // ignore MyFlix enrichment error
                 }
-              } catch {
-                // ignore primary mirror enrichment error
               }
             }
+            const finalEnriched = ensureDetailDubsAndUploader(attachFastRelatedSeasons(enriched));
+            storeDetailInCaches(rawPath, finalEnriched, Date.now() + 12 * 60_000);
+            return finalEnriched;
+          };
 
-            if (mfSearchRes.status === 'fulfilled' && mfSearchRes.value) {
-              try {
-                const mfCards = parseMyFlixCards(mfSearchRes.value).items;
-                const matchedMf = mfCards.find((c) => {
-                  const cNorm = norm(c.title);
-                  return (
-                    cNorm &&
-                    wantNorm &&
-                    (cNorm === wantNorm ||
-                      (cNorm.length >= 4 && wantNorm.includes(cNorm)) ||
-                      (wantNorm.length >= 4 && cNorm.includes(wantNorm)))
-                  );
-                });
-                if (matchedMf) {
-                  const mfRealPath = matchedMf.path.replace(/^\/mf\//, '/');
-                  const mfDetailHtml = await fetchMyFlixHtml(`${mfRealPath}/`, 3000);
-                  const mfDet = parseMyFlixDetail(mfDetailHtml, rawPath);
-                  if (mfDet.episodes.length > 0) {
-                    if (mbDetail.episodes.length === 0) {
-                      mbDetail.episodes = mfDet.episodes;
-                    } else {
-                      mbDetail.episodes = mbDetail.episodes.map((mbEp, idx) => {
-                        const matchedMfEp =
-                          mfDet.episodes.find((me) => me.number === mbEp.number) ||
-                          mfDet.episodes[idx] ||
-                          mfDet.episodes[0];
-                        return {
-                          ...mbEp,
-                          sources: [...(matchedMfEp?.sources || []), ...mbEp.sources],
-                        };
-                      });
-                    }
-                    mbDetail.downloadButtons = [
-                      ...mbDetail.downloadButtons,
-                      ...mfDet.downloadButtons,
-                    ];
-                  }
-                }
-              } catch {
-                // ignore MyFlix enrichment error
-              }
-            }
+          if (!isEnrich && mbDetail.episodes.length > 0) {
+            mbDetail = ensureDetailDubsAndUploader(attachFastRelatedSeasons(mbDetail));
+            storeDetailInCaches(rawPath, mbDetail, Date.now() + 12 * 60_000);
+            res.json({ ok: true, detail: mbDetail });
+            return;
           }
-          mbDetail = ensureDetailDubsAndUploader(attachFastRelatedSeasons(mbDetail));
-          storeDetailInCaches(rawPath, mbDetail, Date.now() + 12 * 60_000);
+
+          mbDetail = await enrichMovieBoxWithBackups(mbDetail);
           res.json({ ok: true, detail: mbDetail });
           return;
         }
@@ -2967,8 +3159,8 @@ async function startServer() {
             mbDet.episodes[0];
           return {
             ...ep,
-            // Keep primary direct streams FIRST, followed by MovieBox & embed backups
-            sources: [...ep.sources, ...(matchedMbEp?.sources || [])],
+            // Put movie-box.co Direct H.264 MP4 streams FIRST, followed by primary streams!
+            sources: [...(matchedMbEp?.sources || []), ...ep.sources],
           };
         });
         // Also append any additional episodes or seasons from MovieBox HD that were missing in the primary/MyFlix listing!
@@ -3110,74 +3302,81 @@ async function startServer() {
 
       let detail = parseMovieDetail(html, rawPath, finalOrigin);
 
-      // Attach MovieBox HD dubs/seasons + MyFlixBD backup embeds
-      detail = await enrichWithMovieBoxStreams(detail);
-
-      try {
-        const effectiveQuery = extractBaseSeriesTitle(fallbackTitle || detail.title)
-          .split(/\s+/)
-          .slice(0, 4)
-          .join(' ');
-        const mfSearchHtml =
-          effectiveQuery.length >= 2
-            ? await fetchMyFlixHtml(`/?s=${encodeURIComponent(effectiveQuery)}`, 2800)
-            : '';
-        if (mfSearchHtml) {
-          const mfCards = parseMyFlixCards(mfSearchHtml).items;
-          if (mfCards.length > 0) {
-            const norm = (s: string) => extractBaseSeriesTitle(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
-            const wantNorm = norm(fallbackTitle || detail.title);
-            const matchedCard = mfCards.find((c) => {
-              const cNorm = norm(c.title);
-              return (
-                cNorm &&
-                wantNorm &&
-                (cNorm === wantNorm ||
-                  (cNorm.length >= 4 && wantNorm.includes(cNorm)) ||
-                  (wantNorm.length >= 4 && cNorm.includes(wantNorm)))
-              );
-            });
-            if (matchedCard) {
-              const mfRealPath = matchedCard.path.replace(/^\/mf\//, '/');
-              const mfDetailHtml = await fetchMyFlixHtml(`${mfRealPath}/`, 3200);
-              const mfDetail = parseMyFlixDetail(mfDetailHtml, rawPath);
-              if (mfDetail.episodes.length > 0) {
-                if (detail.episodes.length === 0) {
-                  detail = {
-                    ...detail,
-                    episodes: mfDetail.episodes,
-                    downloadButtons:
-                      detail.downloadButtons.length > 0
-                        ? detail.downloadButtons
-                        : mfDetail.downloadButtons,
-                  };
-                } else {
-                  detail.episodes = detail.episodes.map((ep, idx) => {
-                    const matchedMfEp =
-                      mfDetail.episodes.find((me) => me.number === ep.number) ||
-                      mfDetail.episodes[idx] ||
-                      mfDetail.episodes[0];
-                    const mfSources = matchedMfEp?.sources || [];
-                    return {
-                      ...ep,
-                      sources: [...ep.sources, ...mfSources],
+      const enrichPrimaryWithCrossSources = async (baseDet: MovieDetailData): Promise<MovieDetailData> => {
+        let enriched = await enrichWithMovieBoxStreams(baseDet);
+        try {
+          const effectiveQuery = extractBaseSeriesTitle(fallbackTitle || enriched.title)
+            .split(/\s+/)
+            .slice(0, 4)
+            .join(' ');
+          const mfSearchHtml =
+            effectiveQuery.length >= 2
+              ? await fetchMyFlixHtml(`/?s=${encodeURIComponent(effectiveQuery)}`, 2800)
+              : '';
+          if (mfSearchHtml) {
+            const mfCards = parseMyFlixCards(mfSearchHtml).items;
+            if (mfCards.length > 0) {
+              const norm = (s: string) => extractBaseSeriesTitle(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+              const wantNorm = norm(fallbackTitle || enriched.title);
+              const matchedCard = mfCards.find((c) => {
+                const cNorm = norm(c.title);
+                return (
+                  cNorm &&
+                  wantNorm &&
+                  (cNorm === wantNorm ||
+                    (cNorm.length >= 4 && wantNorm.includes(cNorm)) ||
+                    (wantNorm.length >= 4 && cNorm.includes(wantNorm)))
+                );
+              });
+              if (matchedCard) {
+                const mfRealPath = matchedCard.path.replace(/^\/mf\//, '/');
+                const mfDetailHtml = await fetchMyFlixHtml(`${mfRealPath}/`, 3200);
+                const mfDetail = parseMyFlixDetail(mfDetailHtml, rawPath);
+                if (mfDetail.episodes.length > 0) {
+                  if (enriched.episodes.length === 0) {
+                    enriched = {
+                      ...enriched,
+                      episodes: mfDetail.episodes,
+                      downloadButtons:
+                        enriched.downloadButtons.length > 0
+                          ? enriched.downloadButtons
+                          : mfDetail.downloadButtons,
                     };
-                  });
+                  } else {
+                    enriched.episodes = enriched.episodes.map((ep, idx) => {
+                      const matchedMfEp =
+                        mfDetail.episodes.find((me) => me.number === ep.number) ||
+                        mfDetail.episodes[idx] ||
+                        mfDetail.episodes[0];
+                      const mfSources = matchedMfEp?.sources || [];
+                      return {
+                        ...ep,
+                        sources: [...ep.sources, ...mfSources],
+                      };
+                    });
+                  }
                 }
               }
             }
           }
+        } catch {
+          // ignore MyFlix enrichment error
         }
-      } catch {
-        // ignore MyFlix enrichment error
-      }
+        enriched = ensureDetailDubsAndUploader(attachFastRelatedSeasons(enriched));
+        if (enriched.episodes.length > 0 || enriched.downloadButtons.length > 0 || enriched.storyline) {
+          storeDetailInCaches(rawPath, enriched, Date.now() + 25 * 60_000);
+        }
+        return enriched;
+      };
 
-      detail = ensureDetailDubsAndUploader(attachFastRelatedSeasons(detail));
-
-      if (detail.episodes.length > 0 || detail.downloadButtons.length > 0 || detail.storyline) {
+      if (!isEnrich && detail.episodes.length > 0) {
+        detail = ensureDetailDubsAndUploader(attachFastRelatedSeasons(detail));
         storeDetailInCaches(rawPath, detail, Date.now() + 25 * 60_000);
+        res.json({ ok: true, detail });
+        return;
       }
 
+      detail = await enrichPrimaryWithCrossSources(detail);
       res.json({ ok: true, detail });
     } catch (err) {
       console.error('Detail fetch error:', err);
@@ -3224,7 +3423,18 @@ async function startServer() {
     res.redirect(302, target);
   });
 
-  // 6a-1. MovieBox HD Direct Ad-Free MP4 Stream & Download Proxy (Injects Referer: https://movieboxhd.net/ + Full HTTP Byte-Range Seeking + Global CDN Fallback!)
+  // In-Memory Micro-Chunk Startup Buffer Cache (Caches initial 1.5MB startup chunk of active streams for 0ms instant start & zero socket hold!)
+  const mbStartupChunkCache = new Map<
+    string,
+    {
+      buf: Buffer;
+      totalSize: number;
+      contentType: string;
+      expiresAt: number;
+    }
+  >();
+
+  // 6a-1. MovieBox HD Micro-Chunked Turbo MP4 Stream & Download Proxy (1.5MB Startup Chunk + 2.5MB Playback Micro-Chunks + RAM Cache!)
   app.get(['/api/mb-stream', '/api/mb-stream.mp4'], async (req, res) => {
     const token = String(req.query.t || '').trim();
     const fbToken = String(req.query.fb || '').trim();
@@ -3239,6 +3449,43 @@ async function startServer() {
       return;
     }
 
+    const INITIAL_STARTUP_CHUNK_BYTES = Math.floor(1.5 * 1024 * 1024); // 1.5MB micro-chunk for <80ms instant moov + keyframe start
+    const PLAYBACK_MICRO_CHUNK_BYTES = Math.floor(2.5 * 1024 * 1024); // 2.5MB micro-chunk so sockets free up immediately between chunks
+
+    let requestedStart = 0;
+    let requestedEnd = NaN;
+    if (req.headers.range) {
+      const m = String(req.headers.range).match(/bytes=(\d+)-(\d*)/i);
+      if (m) {
+        requestedStart = parseInt(m[1], 10) || 0;
+        requestedEnd = m[2] ? parseInt(m[2], 10) : NaN;
+      }
+    }
+
+    // 0ms RAM Hit if the client is requesting bytes inside our cached 1.5MB startup micro-chunk!
+    if (!isDownload && req.method !== 'HEAD' && requestedStart < INITIAL_STARTUP_CHUNK_BYTES) {
+      const ramHit = mbStartupChunkCache.get(targetUrl);
+      if (ramHit && ramHit.expiresAt > Date.now() && requestedStart < ramHit.buf.length) {
+        const sliceEnd = !Number.isNaN(requestedEnd)
+          ? Math.min(requestedEnd, ramHit.buf.length - 1)
+          : ramHit.buf.length - 1;
+        if (sliceEnd >= requestedStart) {
+          const chunk = ramHit.buf.subarray(requestedStart, sliceEnd + 1);
+          res.status(206);
+          res.setHeader('Content-Type', ramHit.contentType || 'video/mp4');
+          res.setHeader('Accept-Ranges', 'bytes');
+          res.setHeader('Cache-Control', 'public, max-age=3600');
+          res.setHeader('Content-Length', String(chunk.length));
+          res.setHeader(
+            'Content-Range',
+            `bytes ${requestedStart}-${sliceEnd}/${ramHit.totalSize}`
+          );
+          res.end(chunk);
+          return;
+        }
+      }
+    }
+
     const abortController = new AbortController();
     res.on('close', () => {
       if (!res.writableEnded) {
@@ -3248,46 +3495,45 @@ async function startServer() {
 
     const forwardHeaders: Record<string, string> = {
       'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      Referer: 'https://movieboxhd.net/',
-      Origin: 'https://movieboxhd.net',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+      Referer: 'https://movie-box.co/',
+      Origin: 'https://movie-box.co',
       Accept: '*/*',
     };
-    const MAX_STREAM_CHUNK_BYTES = 6 * 1024 * 1024; // 6MB chunk cap so reverse proxies never drop >32MB video responses
+
+    const chunkCap =
+      requestedStart === 0 ? INITIAL_STARTUP_CHUNK_BYTES : PLAYBACK_MICRO_CHUNK_BYTES;
+
     if (req.headers.range && !isDownload) {
-      const rangeStr = String(req.headers.range);
-      const m = rangeStr.match(/bytes=(\d+)-(\d*)/i);
-      if (m) {
-        const startByte = parseInt(m[1], 10);
-        const rawEnd = m[2] ? parseInt(m[2], 10) : NaN;
-        const cappedEnd =
-          !Number.isNaN(rawEnd) && rawEnd >= startByte
-            ? Math.min(rawEnd, startByte + MAX_STREAM_CHUNK_BYTES - 1)
-            : startByte + MAX_STREAM_CHUNK_BYTES - 1;
-        forwardHeaders.Range = `bytes=${startByte}-${cappedEnd}`;
-      } else {
-        forwardHeaders.Range = rangeStr;
-      }
+      const cappedEnd =
+        !Number.isNaN(requestedEnd) && requestedEnd >= requestedStart
+          ? Math.min(requestedEnd, requestedStart + chunkCap - 1)
+          : requestedStart + chunkCap - 1;
+      forwardHeaders.Range = `bytes=${requestedStart}-${cappedEnd}`;
     } else if (!req.headers.range && !isDownload && req.method !== 'HEAD') {
-      forwardHeaders.Range = `bytes=0-${MAX_STREAM_CHUNK_BYTES - 1}`;
+      forwardHeaders.Range = `bytes=0-${INITIAL_STARTUP_CHUNK_BYTES - 1}`;
     } else if (req.headers.range) {
       forwardHeaders.Range = String(req.headers.range);
     }
 
     try {
       let upstream: Response | null = null;
-      for (let attempt = 0; attempt < 2; attempt++) {
+      const refererCandidates = [
+        { Referer: 'https://movie-box.co/', Origin: 'https://movie-box.co' },
+        { Referer: 'https://movieboxhd.net/', Origin: 'https://movieboxhd.net' },
+      ];
+      for (let attempt = 0; attempt < refererCandidates.length; attempt++) {
         try {
           upstream = await fetch(targetUrl, {
             method: req.method === 'HEAD' ? 'HEAD' : 'GET',
-            headers: forwardHeaders,
+            headers: { ...forwardHeaders, ...refererCandidates[attempt] },
             signal: abortController.signal,
           });
-          if (upstream.ok || upstream.status === 206 || upstream.status < 500) {
+          if (upstream.ok || upstream.status === 206) {
             break;
           }
         } catch (fetchErr) {
-          if (abortController.signal.aborted || attempt === 1) throw fetchErr;
+          if (abortController.signal.aborted || attempt === refererCandidates.length - 1) throw fetchErr;
         }
       }
 
@@ -3321,15 +3567,17 @@ async function startServer() {
         return;
       }
 
+      const contentType = upstream.headers.get('content-type') || 'video/mp4';
+      const contentRange = upstream.headers.get('content-range') || '';
+      const contentLength = upstream.headers.get('content-length');
+
       res.status(upstream.status);
-      res.setHeader('Content-Type', upstream.headers.get('content-type') || 'video/mp4');
+      res.setHeader('Content-Type', contentType);
       res.setHeader('Accept-Ranges', upstream.headers.get('accept-ranges') || 'bytes');
       res.setHeader('Cache-Control', 'public, max-age=3600');
-      const contentLength = upstream.headers.get('content-length');
       if (contentLength) {
         res.setHeader('Content-Length', contentLength);
       }
-      const contentRange = upstream.headers.get('content-range');
       if (contentRange) {
         res.setHeader('Content-Range', contentRange);
       }
@@ -3345,7 +3593,41 @@ async function startServer() {
         return;
       }
 
+      // Cache initial 0..1.5MB startup chunk in RAM while streaming it to the client!
+      const shouldCacheStartupChunk =
+        !isDownload &&
+        requestedStart === 0 &&
+        upstream.status === 206 &&
+        !mbStartupChunkCache.has(targetUrl);
+      const totalMatch = contentRange.match(/\/(\d+)$/);
+      const parsedTotalSize = totalMatch ? parseInt(totalMatch[1], 10) : 0;
+      const collectedChunks: Buffer[] = [];
+      let collectedLen = 0;
+
       const nodeStream = Readable.fromWeb(upstream.body as any);
+      if (shouldCacheStartupChunk && parsedTotalSize > 0) {
+        nodeStream.on('data', (chunk: Buffer) => {
+          if (collectedLen <= INITIAL_STARTUP_CHUNK_BYTES) {
+            const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            collectedChunks.push(b);
+            collectedLen += b.length;
+          }
+        });
+        nodeStream.on('end', () => {
+          if (collectedLen > 32768 && collectedLen <= INITIAL_STARTUP_CHUNK_BYTES + 65536) {
+            if (mbStartupChunkCache.size >= 24) {
+              const oldestKey = mbStartupChunkCache.keys().next().value;
+              if (oldestKey) mbStartupChunkCache.delete(oldestKey);
+            }
+            mbStartupChunkCache.set(targetUrl, {
+              buf: Buffer.concat(collectedChunks),
+              totalSize: parsedTotalSize,
+              contentType,
+              expiresAt: Date.now() + 10 * 60_000,
+            });
+          }
+        });
+      }
       nodeStream.on('error', () => {
         if (!res.headersSent) res.status(502).end();
         else res.end();

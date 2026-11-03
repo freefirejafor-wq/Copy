@@ -282,12 +282,26 @@ function pickBestSourceIndexForNet(sources: StreamSource[], autoNet: boolean): n
 
   const isDirectStream = (s: StreamSource) =>
     s.type !== 'embed' && !/abyssplayer\.com|abysscdn\.com|vidsrc|\/embed\//i.test(s.url || '');
+  const isNativeMp4Stream = (s: StreamSource) =>
+    isDirectStream(s) &&
+    (s.type === 'mp4' ||
+      /\/api\/mb-stream|\/api\/mb-ep-stream|\.(mp4|m4v)(\?|$)/i.test(s.url || ''));
   const isLightweightH264 = (s: StreamSource) =>
     isDirectStream(s) &&
     !/\b(hevc|h\.?265|x265|10bit|av1)\b/i.test(`${s.name} ${s.qualityLabel}`) &&
     !/best\s*quality/i.test(s.qualityLabel || '');
   const isAnyDirectH264 = (s: StreamSource) =>
     isDirectStream(s) && !/\b(hevc|h\.?265|x265|10bit|av1)\b/i.test(`${s.name} ${s.qualityLabel}`);
+
+  // 0. Always prefer Native H.264 MP4 (movie-box.co Direct MP4) first so iOS/Android play natively in 0.2s without MKV remuxing!
+  if (autoNet) {
+    const mp4Fast = sources.findIndex(
+      (s) => isNativeMp4Stream(s) && (s.quality === 720 || (s.quality >= 360 && s.quality <= 576))
+    );
+    if (mp4Fast !== -1) return mp4Fast;
+  }
+  const anyNativeMp4 = sources.findIndex((s) => isNativeMp4Stream(s));
+  if (anyNativeMp4 !== -1) return anyNativeMp4;
 
   if (!autoNet) {
     const firstH264 = sources.findIndex((s) => isLightweightH264(s));
@@ -298,7 +312,7 @@ function pickBestSourceIndexForNet(sources: StreamSource[], autoNet: boolean): n
     return anyDirect !== -1 ? anyDirect : 0;
   }
 
-  // 1. Prefer 480p (360p..576p) H.264 first if no MyFlix server is available
+  // 1. Prefer 480p (360p..576p) H.264 first
   const h480 = sources.findIndex(
     (s) => isLightweightH264(s) && s.quality >= 360 && s.quality <= 576
   );
@@ -849,9 +863,48 @@ export const MovieDetailModal: React.FC<MovieDetailModalProps> = ({
     return () => window.clearTimeout(timer);
   }, [resumedBannerSec]);
 
+  const releaseActiveVideoSockets = () => {
+    stopBackgroundWarmVideo();
+    if (hlsInstanceRef.current) {
+      try {
+        hlsInstanceRef.current.destroy();
+      } catch {
+        // ignore
+      }
+      hlsInstanceRef.current = null;
+    }
+    if (iosControllerRef.current) {
+      try {
+        iosControllerRef.current.destroy();
+      } catch {
+        // ignore
+      }
+      iosControllerRef.current = null;
+    }
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+        videoRef.current.removeAttribute('src');
+        videoRef.current.load();
+      } catch {
+        // ignore
+      }
+    }
+    if (preloadVideoRef.current) {
+      try {
+        preloadVideoRef.current.pause();
+        preloadVideoRef.current.removeAttribute('src');
+        preloadVideoRef.current.load();
+      } catch {
+        // ignore
+      }
+    }
+  };
+
   useEffect(() => {
     return () => {
       setVideoStartupPriority(false);
+      releaseActiveVideoSockets();
       if (subtitleUrl) {
         URL.revokeObjectURL(subtitleUrl);
       }
@@ -877,6 +930,8 @@ export const MovieDetailModal: React.FC<MovieDetailModalProps> = ({
   useEffect(() => {
     if (!movie) return;
     let cancelled = false;
+    // Immediately abort any previous movie's open <video> stream so 100% of browser sockets are free for the new click!
+    releaseActiveVideoSockets();
     setVideoStartupPriority(true);
     setError(null);
     setSelectedSeasonFilter('all');
@@ -1049,19 +1104,25 @@ export const MovieDetailModal: React.FC<MovieDetailModalProps> = ({
       return;
     }
     let cancelled = false;
+    setMyflixData(null);
     setShowSeasonDropdown(false);
     setShowDubDropdown(false);
     setShowAllScreenshots(false);
     setLightboxImage(null);
-    universalApiFetch(`/api/myflix?title=${encodeURIComponent(movie.title)}`)
-      .then((res) => {
-        if (!cancelled && res && res.ok) {
-          setMyflixData(res);
-        }
-      })
-      .catch(() => {});
+    // Defer secondary /api/myflix metadata fetch by 1800ms so /api/details and /api/mb-stream.mp4 get 100% of sockets on click!
+    const mfTimer = window.setTimeout(() => {
+      if (cancelled) return;
+      universalApiFetch(`/api/myflix?title=${encodeURIComponent(movie.title)}`)
+        .then((res) => {
+          if (!cancelled && res && res.ok) {
+            setMyflixData(res);
+          }
+        })
+        .catch(() => {});
+    }, 1800);
     return () => {
       cancelled = true;
+      window.clearTimeout(mfTimer);
     };
   }, [movie?.path, movie?.title]);
 
@@ -1137,22 +1198,27 @@ export const MovieDetailModal: React.FC<MovieDetailModalProps> = ({
     );
     const score = (src: StreamSource) => {
       const url = src.url || '';
+      const isMovieBox =
+        src.id?.startsWith('mb-') || /\/api\/mb-stream|\/api\/mb-ep-stream/i.test(url);
+      if (isMovieBox) {
+        // Prioritize native H.264 MP4 Micro-Chunk streams from movie-box.co first!
+        // Rank fast-start 720p/480p/360p (or 1080p <= 350MB) ahead of heavy 900MB 1080p files for <150ms startup
+        const szMatch = (src.name || '').match(/(\d+)\s*MB/i);
+        const szMb = szMatch ? parseInt(szMatch[1], 10) : 0;
+        const isHeavyFile = szMb > 350;
+        const base = 4500;
+        if (src.quality === 720) return base + 260;
+        if (src.quality === 480) return base + 250;
+        if (src.quality >= 360 && src.quality <= 576) return base + 235;
+        if (src.quality === 1080) return isHeavyFile ? base + 140 : base + 245;
+        return base + 200;
+      }
       const isDirectCdn = /fsldownload\.com|r2\.dev|workers\.dev|cloudflare/i.test(url);
       if (isDirectCdn) {
         if (src.quality === 720) return 3850;
         if (src.quality >= 360 && src.quality <= 576) return 3800;
         if (src.quality === 1080) return 3750;
         return 3600;
-      }
-      const isMovieBox =
-        src.id?.startsWith('mb-') || /\/api\/mb-stream|\/api\/mb-ep-stream/i.test(url);
-      if (isMovieBox) {
-        const hasFallback = /[?&]fb=/.test(url);
-        const base = hasFallback ? 2200 : 1500;
-        if (src.quality === 720) return base + 250;
-        if (src.quality >= 360 && src.quality <= 576) return base + 200;
-        if (src.quality === 1080) return base + 150;
-        return base;
       }
       const isHevc = /\b(hevc|h\.?265|x265|10bit|av1)\b/i.test(`${src.name} ${src.qualityLabel}`);
       const isBestHeavy = /best\s*quality/i.test(src.qualityLabel || '');
@@ -1733,8 +1799,7 @@ export const MovieDetailModal: React.FC<MovieDetailModalProps> = ({
       }
     }, 500);
 
-    // Patient 12s Startup Watchdog: only switch servers if current server fails to even deliver metadata (readyState === 0) after 12s!
-    // Never interrupt an active MKV stream at 2s-4s while it is completing its Range handshake on mobile networks.
+    // Fast 3.2s Startup Watchdog: if current server hasn't delivered metadata within 3.2s, immediately switch to the next server!
     if (startupWatchdogTimerRef.current) {
       window.clearTimeout(startupWatchdogTimerRef.current);
     }
@@ -1750,7 +1815,7 @@ export const MovieDetailModal: React.FC<MovieDetailModalProps> = ({
           setSelectedSourceIdx(nextIdx);
         }
       }
-    }, 12000);
+    }, 3200);
 
     return () => {
       window.clearTimeout(bufTimer);

@@ -43,10 +43,22 @@ const staticDbTitleIndex = new Map<string, MovieDetailData>();
 const clientCatalogCache = new Map<string, { items: MovieCardItem[]; maxPage: number; ts: number }>();
 const clientDetailCache = new Map<string, { detail: MovieDetailData; ts: number }>();
 const inFlightDetailPromises = new Map<string, Promise<any>>();
+const bgPrefetchControllers = new Set<AbortController>();
 let isVideoActivelyStarting = false;
 
 export function setVideoStartupPriority(active: boolean): void {
   isVideoActivelyStarting = active;
+  if (active) {
+    stopBackgroundWarmVideo();
+    for (const ctrl of bgPrefetchControllers) {
+      try {
+        ctrl.abort();
+      } catch {
+        // ignore
+      }
+    }
+    bgPrefetchControllers.clear();
+  }
 }
 
 function normalizeLookupTitleKey(rawTitle: string): string {
@@ -97,10 +109,14 @@ function sortEpisodeSourcesFastestFirst(sources?: StreamSource[]): StreamSource[
     const isMovieBox =
       src.id?.startsWith('mb-') || /\/api\/mb-stream|\/api\/mb-ep-stream/i.test(src.url || '');
     if (isMovieBox) {
-      if (src.quality === 720) return 2250;
-      if (src.quality === 1080) return 2220;
-      if (src.quality >= 360 && src.quality <= 576) return 2180;
-      return 2100;
+      const szMatch = (src.name || '').match(/(\d+)\s*MB/i);
+      const szMb = szMatch ? parseInt(szMatch[1], 10) : 0;
+      const isHeavy = szMb > 350;
+      if (src.quality === 720) return 4650;
+      if (src.quality === 480) return 4640;
+      if (src.quality === 360) return 4620;
+      if (src.quality === 1080) return isHeavy ? 4550 : 4630;
+      return 4500;
     }
     const isHevc = /\b(hevc|h\.?265|x265|10bit|av1)\b/i.test(`${src.name} ${src.qualityLabel}`);
     const isBestHeavy = /best\s*quality/i.test(src.qualityLabel || '');
@@ -184,18 +200,12 @@ async function loadStaticDb(): Promise<StaticDbSnapshot | null> {
   return staticDbPromise;
 }
 
-// Kick off static-db.json + local shards preload and CDN preconnect immediately on startup for 0ms first-click playback!
+// Preconnect video CDNs on startup without loading heavy static files when running on the live API server!
 if (typeof window !== 'undefined') {
   ensurePreconnectOrigin('https://fsldownload.com');
+  ensurePreconnectOrigin('https://bcdnxw.hakunaymatata.com');
   if (window.location.hostname.endsWith('github.io')) {
-    const hexChars = '0123456789abcdef'.split('');
-    void Promise.allSettled(hexChars.map((hex) => loadShardByHex(hex)));
-    loadStaticDb().then((db) => {
-      const homeItems = db?.catalogs?.['/'] || INITIAL_FALLBACK_MOVIES['/'] || [];
-      if (homeItems.length > 0) {
-        scheduleBackgroundCatalogDetailWarmup(homeItems, 'node-moviebox');
-      }
-    });
+    loadStaticDb().catch(() => {});
   }
 }
 
@@ -422,6 +432,16 @@ export function getInstantCachedDetail(rawPath: string, rawTitle = ''): MovieDet
     return mem.detail;
   }
 
+  if (loadedStaticDb?.details?.[pathKey]?.episodes?.length) {
+    return loadedStaticDb.details[pathKey];
+  }
+
+  if (rawTitle) {
+    const k1 = normalizeLookupTitleKey(rawTitle);
+    const byK1 = k1 ? staticDbTitleIndex.get(k1) : undefined;
+    if (byK1 && byK1.episodes?.length) return byK1;
+  }
+
   return null;
 }
 
@@ -441,56 +461,49 @@ export function prefetchMovieDetails(
 
   const existing = getInstantCachedDetail(pathKey, rawTitle);
   if (existing) {
-    warmDetailFirstStream(existing, primeMediaDecoder);
+    if (primeMediaDecoder) warmDetailFirstStream(existing, false);
     return;
   }
 
-  loadShardForMovie(pathKey, rawTitle)
-    .then((shardHit) => {
-      if (shardHit && shardHit.episodes?.length) {
-        warmDetailFirstStream(shardHit, primeMediaDecoder);
-        return;
-      }
-      // If not in static shards (e.g. a brand-new live upload), prefetch /api/details into clientDetailCache!
-      if (!pathKey || inFlightDetailPromises.has(pathKey) || isVideoActivelyStarting) return;
-      const params = new URLSearchParams({
-        path: pathKey,
-        title: rawTitle,
-        node: nodeId,
-      });
-      const p = fetch(`/api/details?${params.toString()}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((json) => {
-          if (json?.ok && json?.detail?.episodes?.length) {
-            for (const ep of json.detail.episodes || []) {
-              for (const src of ep.sources || []) {
-                if (src.downloadUrl) src.downloadUrl = resolveDirectDownloadUrl(src.downloadUrl);
-              }
-            }
-            clientDetailCache.set(pathKey, { detail: json.detail, ts: Date.now() });
-            indexDetailsIntoMemory({ [pathKey]: json.detail }, true);
-            warmDetailFirstStream(json.detail, false);
+  if (!pathKey || inFlightDetailPromises.has(pathKey) || bgPrefetchControllers.size >= 2) return;
+  const ctrl = new AbortController();
+  bgPrefetchControllers.add(ctrl);
+  const params = new URLSearchParams({
+    path: pathKey,
+    title: rawTitle,
+    node: nodeId,
+  });
+  const p = fetch(`/api/details?${params.toString()}`, { signal: ctrl.signal })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((json) => {
+      if (json?.ok && json?.detail?.episodes?.length) {
+        for (const ep of json.detail.episodes || []) {
+          for (const src of ep.sources || []) {
+            if (src.downloadUrl) src.downloadUrl = resolveDirectDownloadUrl(src.downloadUrl);
           }
-          return json;
-        })
-        .catch(() => null)
-        .finally(() => {
-          inFlightDetailPromises.delete(pathKey);
-        });
-      inFlightDetailPromises.set(pathKey, p);
+        }
+        clientDetailCache.set(pathKey, { detail: json.detail, ts: Date.now() });
+        indexDetailsIntoMemory({ [pathKey]: json.detail }, true);
+      }
+      return json;
     })
-    .catch(() => {});
+    .catch(() => null)
+    .finally(() => {
+      bgPrefetchControllers.delete(ctrl);
+      inFlightDetailPromises.delete(pathKey);
+    });
+  inFlightDetailPromises.set(pathKey, p);
 }
 
 function scheduleBackgroundCatalogDetailWarmup(items: MovieCardItem[], nodeId: string): void {
   if (typeof window === 'undefined' || !items?.length) return;
-  // Pre-warm the top 12 visible items in the catalog so the very first click is already in RAM!
-  items.slice(0, 12).forEach((item, idx) => {
+  // Gently pre-warm only the top 2 visible items after 800ms so background requests never clog the browser's 6-connection pool!
+  items.slice(0, 2).forEach((item, idx) => {
     window.setTimeout(() => {
       if (!isVideoActivelyStarting && item?.path) {
-        prefetchMovieDetails(item.path, item.title, nodeId, idx < 3);
+        prefetchMovieDetails(item.path, item.title, nodeId, false);
       }
-    }, 15 + idx * 45);
+    }, 800 + idx * 450);
   });
 }
 
@@ -995,8 +1008,22 @@ export async function universalApiFetch(endpoint: string, init?: RequestInit): P
     }
   }
 
-  // 1. Try local server first when not on static github.io
+  // 1. Unified Server API First (with instant client RAM cache for 0ms category switching!)
   if (!isGitHubPages) {
+    if (pathname === '/api/catalog' && parsedUrl.searchParams.get('refresh') !== '1') {
+      const cKey = `api::${parsedUrl.searchParams.get('path') || '/'}::p=${parsedUrl.searchParams.get('page') || '1'}::q=${parsedUrl.searchParams.get('q') || ''}::n=${parsedUrl.searchParams.get('node') || 'auto'}`;
+      const cHit = clientCatalogCache.get(cKey);
+      if (cHit && Date.now() - cHit.ts < 60_000 && cHit.items.length > 0) {
+        return {
+          ok: true,
+          cached: true,
+          items: cHit.items,
+          page: parseInt(parsedUrl.searchParams.get('page') || '1', 10) || 1,
+          maxPage: cHit.maxPage,
+          activeNodeId: parsedUrl.searchParams.get('node') || 'node-moviebox',
+        };
+      }
+    }
     try {
       const res = await fetch(endpoint, init);
       const contentType = res.headers.get('content-type') || '';
@@ -1018,6 +1045,12 @@ export async function universalApiFetch(endpoint: string, init?: RequestInit): P
           }
           warmDetailFirstStream(json.detail);
         } else if (pathname === '/api/catalog' && Array.isArray(json?.items) && json.items.length > 0) {
+          const cKey = `api::${parsedUrl.searchParams.get('path') || '/'}::p=${parsedUrl.searchParams.get('page') || '1'}::q=${parsedUrl.searchParams.get('q') || ''}::n=${parsedUrl.searchParams.get('node') || 'auto'}`;
+          clientCatalogCache.set(cKey, {
+            items: json.items,
+            maxPage: Number(json.maxPage) || 2500,
+            ts: Date.now(),
+          });
           if (json.prefetchedDetails && typeof json.prefetchedDetails === 'object') {
             indexDetailsIntoMemory(json.prefetchedDetails, true);
             for (const [detPath, detVal] of Object.entries(json.prefetchedDetails)) {
@@ -1031,7 +1064,7 @@ export async function universalApiFetch(endpoint: string, init?: RequestInit): P
           }
           scheduleBackgroundCatalogDetailWarmup(
             json.items,
-            parsedUrl.searchParams.get('node') || 'node-alpha'
+            parsedUrl.searchParams.get('node') || 'node-moviebox'
           );
         }
         return json;
