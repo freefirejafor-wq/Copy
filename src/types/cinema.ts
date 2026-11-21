@@ -19,6 +19,15 @@ export interface MovieCardItem {
   isDhamaka?: boolean;
   hypeBadge?: string;
   uploadedAtMs?: number;
+  backdrop?: string;
+  sourceSite?: 'moviebox' | 'movielinkbd';
+}
+
+export interface HomeShelfSection {
+  id: string;
+  title: string;
+  source: 'moviebox' | 'movielinkbd';
+  items: MovieCardItem[];
 }
 
 export type WatchlistFolder = 'favorites' | 'watch_later' | 'anime_series';

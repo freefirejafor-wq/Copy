@@ -348,43 +348,10 @@ function ensurePreconnectOrigin(streamUrl: string): void {
  * Warms DNS, TCP, and TLS handshakes to the video CDN origin AND initializes the browser's
  * hardware video decoder once on page boot so the 1st movie click starts as fast as the 2nd+ click.
  */
-export function warmStreamConnection(streamUrl?: string, primeMediaDecoder = false): void {
+export function warmStreamConnection(streamUrl?: string, _primeMediaDecoder = false): void {
   if (!streamUrl || typeof window === 'undefined') return;
   if (!streamUrl.startsWith('http')) return;
   ensurePreconnectOrigin(streamUrl);
-  if (!isVideoActivelyStarting && primeMediaDecoder && !warmedStreamUrls.has(streamUrl)) {
-    warmedStreamUrls.add(streamUrl);
-    if (isAppleSafariDevice()) {
-      prewarmMkvStreamMeta(streamUrl);
-    } else if (!hasPrimedHardwareDecoder && typeof document !== 'undefined') {
-      // One-time background hardware video decoder & <video> media socket warmup on Android/Desktop
-      // before the user clicks their 1st movie! Stops automatically as soon as metadata is ready.
-      hasPrimedHardwareDecoder = true;
-      try {
-        const v = document.createElement('video');
-        v.muted = true;
-        v.playsInline = true;
-        v.preload = 'metadata';
-        v.style.position = 'fixed';
-        v.style.width = '1px';
-        v.style.height = '1px';
-        v.style.opacity = '0';
-        v.style.pointerEvents = 'none';
-        v.style.left = '-9999px';
-        warmVideoEl = v;
-        const cleanupWarm = () => {
-          stopBackgroundWarmVideo();
-        };
-        v.addEventListener('loadedmetadata', cleanupWarm, { once: true });
-        v.addEventListener('error', cleanupWarm, { once: true });
-        v.src = streamUrl;
-        v.load();
-        window.setTimeout(cleanupWarm, 1100);
-      } catch {
-        // ignore
-      }
-    }
-  }
 }
 
 export function stopBackgroundWarmVideo(): void {
@@ -422,24 +389,14 @@ function warmDetailFirstStream(detail?: MovieDetailData | null, primeMediaDecode
  * Synchronous 0ms detail lookup from in-memory cache or pre-loaded static-db.json
  * so clicking a movie opens the video player immediately without any loading spinner!
  */
-export function getInstantCachedDetail(rawPath: string, rawTitle = ''): MovieDetailData | null {
+export function getInstantCachedDetail(rawPath: string, _rawTitle = ''): MovieDetailData | null {
   const pathKey = (rawPath || '').trim();
-  if (!pathKey && !rawTitle) return null;
+  if (!pathKey) return null;
 
   const mem = clientDetailCache.get(pathKey);
-  // Only use in-memory detail cache if fetched within the last 12 minutes so stream tokens never expire
+  // Strict exact-path cache lookup only so dual-source episodes NEVER mix!
   if (mem && Date.now() - mem.ts < 12 * 60_000 && mem.detail?.episodes?.length) {
     return mem.detail;
-  }
-
-  if (loadedStaticDb?.details?.[pathKey]?.episodes?.length) {
-    return loadedStaticDb.details[pathKey];
-  }
-
-  if (rawTitle) {
-    const k1 = normalizeLookupTitleKey(rawTitle);
-    const byK1 = k1 ? staticDbTitleIndex.get(k1) : undefined;
-    if (byK1 && byK1.episodes?.length) return byK1;
   }
 
   return null;
@@ -495,23 +452,15 @@ export function prefetchMovieDetails(
   inFlightDetailPromises.set(pathKey, p);
 }
 
-function scheduleBackgroundCatalogDetailWarmup(items: MovieCardItem[], nodeId: string): void {
-  if (typeof window === 'undefined' || !items?.length) return;
-  // Gently pre-warm only the top 2 visible items after 800ms so background requests never clog the browser's 6-connection pool!
-  items.slice(0, 2).forEach((item, idx) => {
-    window.setTimeout(() => {
-      if (!isVideoActivelyStarting && item?.path) {
-        prefetchMovieDetails(item.path, item.title, nodeId, false);
-      }
-    }, 800 + idx * 450);
-  });
+function scheduleBackgroundCatalogDetailWarmup(_items: MovieCardItem[], _nodeId: string): void {
+  // Keep browser connection pool 100% free for instant video playback
 }
 
 const NODE_ORIGIN_MAP: Record<string, string> = {
-  'node-alpha': 'https://cmyyhb.movielinkbd.at',
-  'node-beta': 'https://4yer8f.movielinkbd.at',
-  'node-gamma': 'https://cmyyhb.movielinkbd.at',
-  'node-delta': 'https://4yer8f.movielinkbd.at',
+  'node-alpha': 'https://wvaedp.movielinkbd.at',
+  'node-beta': 'https://movielinkbd.at',
+  'node-gamma': 'https://movielinkbd.com',
+  'node-delta': 'https://cmyyhb.movielinkbd.at',
 };
 
 async function fetchMirrorHtmlClientSide(
@@ -1081,12 +1030,11 @@ export async function universalApiFetch(endpoint: string, init?: RequestInit): P
     return {
       categories: ALL_CATEGORIES,
       nodes: [
-        { id: 'node-moviebox', name: 'MovieBox HD', region: 'Global 4K/1080p Hub' },
+        { id: 'node-moviebox', name: 'HD Server 1', region: 'Global 4K/1080p Hub' },
         { id: 'node-alpha', name: 'Node Alpha', region: 'BD-Fast Edge' },
         { id: 'node-beta', name: 'Node Beta', region: 'SG-Ultra CDN' },
         { id: 'node-gamma', name: 'Node Gamma', region: 'Global Stream' },
         { id: 'node-delta', name: 'Node Delta', region: 'Backup Core' },
-        { id: 'node-myflix', name: 'Node MyFlix', region: 'BD-Dual Hub' },
       ],
     };
   }
@@ -1095,12 +1043,11 @@ export async function universalApiFetch(endpoint: string, init?: RequestInit): P
     return {
       ok: true,
       nodes: [
-        { id: 'node-moviebox', name: 'MovieBox HD', region: 'Global 4K/1080p Hub', latencyMs: 24, online: true },
+        { id: 'node-moviebox', name: 'HD Server 1', region: 'Global 4K/1080p Hub', latencyMs: 24, online: true },
         { id: 'node-alpha', name: 'Node Alpha', region: 'BD-Fast Edge', latencyMs: 38, online: true },
         { id: 'node-beta', name: 'Node Beta', region: 'SG-Ultra CDN', latencyMs: 54, online: true },
         { id: 'node-gamma', name: 'Node Gamma', region: 'Global Stream', latencyMs: 79, online: true },
         { id: 'node-delta', name: 'Node Delta', region: 'Backup Core', latencyMs: 96, online: true },
-        { id: 'node-myflix', name: 'Node MyFlix', region: 'BD-Dual Hub', latencyMs: 42, online: true },
       ],
     };
   }
@@ -1551,132 +1498,6 @@ export async function universalApiFetch(endpoint: string, init?: RequestInit): P
       serverTime: now,
       notifications: notifications.slice(0, 28),
     };
-  }
-
-  if (pathname === '/api/myflix') {
-    const rawTitle = (parsedUrl.searchParams.get('title') || '').trim();
-    const cleanQuery = rawTitle
-      .replace(/\[.*?\]|\(.*?\)/g, ' ')
-      .replace(/\b(?:20\d{2}|19\d{2}|S\d+|Season\s*\d+|Ep(?:isode)?\s*\d+|Complete|WEB-?DL|WEBRip|BluRay|HDTC|1080p|720p|480p|Dual\s*Audio|Multi\s*Audio|Hindi|Bangla|Bengali|English|Dubbed)\b/gi, ' ')
-      .replace(/\s{2,}/g, ' ')
-      .trim();
-
-    if (!cleanQuery || cleanQuery.length < 2) {
-      return { ok: false };
-    }
-
-    try {
-      const searchUrl = `https://myflixbd.to/wp-json/wp/v2/search?search=${encodeURIComponent(cleanQuery)}&per_page=4`;
-      const sRes = await fetch(searchUrl, { signal: AbortSignal.timeout(4500) });
-      if (!sRes.ok) return { ok: false };
-      const results = (await sRes.json()) as Array<{ title?: string; url?: string }>;
-      if (!Array.isArray(results) || results.length === 0) return { ok: false };
-
-      const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
-      const targetNorm = norm(cleanQuery);
-      const matched =
-        results.find((r) => norm(String(r.title || '')).includes(targetNorm)) || results[0];
-      if (!matched?.url) return { ok: false };
-
-      let html = '';
-      for (const buildProxy of CORS_BRIDGES) {
-        try {
-          const pRes = await fetch(buildProxy(matched.url), { signal: AbortSignal.timeout(5000) });
-          if (pRes.ok) {
-            html = await pRes.text();
-            if (html.includes('player-container-0')) break;
-          }
-        } catch {
-          // try next proxy
-        }
-      }
-      if (!html) return { ok: false };
-
-      const embedServers: Array<{ label: string; url: string }> = [];
-      const seenUrls = new Set<string>();
-      for (const m of html.matchAll(/data-url=["'](https?:\/\/[^"']+)["']/gi)) {
-        const u = m[1].trim();
-        if (u && !seenUrls.has(u)) {
-          seenUrls.add(u);
-          embedServers.push({ label: `Server ${embedServers.length + 1}`, url: u });
-        }
-      }
-      for (const m of html.matchAll(/data-litespeed-src=["'](https?:\/\/player\.[^"']+)["']/gi)) {
-        const u = m[1].trim();
-        if (u && !seenUrls.has(u)) {
-          seenUrls.add(u);
-          embedServers.push({ label: `Server ${embedServers.length + 1}`, url: u });
-        }
-      }
-
-      const extractMeta = (label: string) => {
-        const re = new RegExp(
-          `<span[^>]*class=["']meta-label["'][^>]*>\\s*${label}\\s*<\\/span>\\s*<span[^>]*class=["']meta-value[^"']*["'][^>]*>([\\s\\S]*?)<\\/span>`,
-          'i'
-        );
-        const m = html.match(re);
-        return m ? decodeHtmlEntities(m[1]) : '';
-      };
-
-      const screenshots: string[] = [];
-      for (const m of html.matchAll(/openLightbox\(['"](https?:\/\/[^'"]+)['"]\)/gi)) {
-        if (m[1] && !screenshots.includes(m[1])) {
-          screenshots.push(m[1]);
-        }
-      }
-
-      const cast: Array<{ name: string; role: string; photo: string }> = [];
-      const castRegex =
-        /<div class=["']cast-card["']>[\s\S]*?data-src=["'](https?:\/\/[^"']+)["'][\s\S]*?<span class=["']cast-name["']>([\s\S]*?)<\/span>\s*<span class=["']cast-role["']>([\s\S]*?)<\/span>/gi;
-      for (const m of html.matchAll(castRegex)) {
-        const photo = m[1].trim();
-        const name = decodeHtmlEntities(m[2]);
-        const role = decodeHtmlEntities(m[3]) || 'Actor';
-        if (name && photo) {
-          cast.push({ name, role, photo });
-        }
-      }
-
-      const downloads: Array<{ label: string; url: string }> = [];
-      const dlRegex =
-        /<a[^>]*class=["'][^"']*dl-v2-btn[^"']*["'][^>]*href=["'](https?:\/\/[^"']+)["'][\s\S]*?<div class=["']dl-v2-title["']>([\s\S]*?)<\/div>/gi;
-      for (const m of html.matchAll(dlRegex)) {
-        const url = m[1].trim();
-        const label = decodeHtmlEntities(m[2]);
-        if (url && label) {
-          downloads.push({ label, url });
-        }
-      }
-
-      let seasonsData: any[] = [];
-      const seasonsMatch = html.match(/const\s+seasonsData\s*=\s*(\[[\s\S]*?\]);/);
-      if (seasonsMatch?.[1]) {
-        try {
-          seasonsData = JSON.parse(seasonsMatch[1]);
-        } catch {
-          // ignore
-        }
-      }
-
-      const ratingMatch = html.match(/class=["']rating-score["'][^>]*>([\d.]+)<\/span>/i);
-
-      return {
-        ok: true,
-        embedServers,
-        seasonsData,
-        year: extractMeta('Year'),
-        genre: extractMeta('Genre'),
-        runtime: extractMeta('Runtime'),
-        director: extractMeta('Director'),
-        release: extractMeta('Release'),
-        rating: ratingMatch ? ratingMatch[1].trim() : '',
-        screenshots,
-        cast,
-        downloads,
-      };
-    } catch {
-      return { ok: false };
-    }
   }
 
   return { ok: true, requests: [] };

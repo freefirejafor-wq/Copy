@@ -13,22 +13,16 @@ import {
   Film,
   Flame,
   FolderHeart,
-  GraduationCap,
   History,
   Home,
   Layers,
   Loader2,
   Megaphone,
-  MessageCircle,
-  MessageSquareWarning,
   Mic,
   Play,
   RefreshCw,
-  ScanLine,
   Search,
-  Settings,
   SlidersHorizontal,
-  Smile,
   Star,
   Trash2,
   Trophy,
@@ -49,9 +43,9 @@ import type {
   CategoryOption,
   EpisodeItem,
   GlobalMovieNotification,
+  HomeShelfSection,
   MovieCardItem,
   StreamSource,
-  UserMovieRequest,
   WatchlistFolder,
   WatchProgressItem,
 } from './types/cinema';
@@ -61,6 +55,7 @@ import { PWAInstallModal } from './components/PWAInstallModal';
 import { MovieRequestModal } from './components/MovieRequestModal';
 import { prefetchMovieDetails, universalApiFetch } from './services/liveClientEngine';
 import {
+  deduplicateByExactPath,
   deduplicateMovieCards,
   getItemMinutesAgo,
   isUploadedWithinMinutes,
@@ -106,28 +101,7 @@ function formatShortLanguage(lang: string): string {
   return 'English';
 }
 
-function getCardSourceInfo(path?: string): { id: 'MOVIEBOX' | 'MOVIELINKBD' | 'MYFLIX'; label: string; badgeClass: string } {
-  const p = String(path || '');
-  if (p.startsWith('/mb/')) {
-    return {
-      id: 'MOVIEBOX',
-      label: 'MovieBox',
-      badgeClass: 'bg-emerald-600/90 text-white border-emerald-400/40',
-    };
-  }
-  if (p.startsWith('/mf/')) {
-    return {
-      id: 'MYFLIX',
-      label: 'MyFlix',
-      badgeClass: 'bg-purple-600/90 text-white border-purple-400/40',
-    };
-  }
-  return {
-    id: 'MOVIELINKBD',
-    label: 'MovieLinkBD',
-    badgeClass: 'bg-[#dc2626]/90 text-white border-red-400/40',
-  };
-}
+
 
 export default function App() {
   const { isInstallable, isInstalled, isIOS, isOnline, install } = usePWAInstall();
@@ -159,8 +133,7 @@ export default function App() {
   const searchContainerRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Advanced Filters & Sorting (Default: HOT_HYPE so popular, high-rating, dhamaka items stay on top)
-  const [sourceFilter, setSourceFilter] = useState<'ALL' | 'MOVIEBOX' | 'MOVIELINKBD' | 'MYFLIX'>('ALL');
+  // Advanced Filters & Sorting (Default: HOT_HYPE so popular, high-rating items stay on top)
   const [audioFilter, setAudioFilter] = useState<'ALL' | 'BANGLA' | 'HINDI' | 'DUAL' | 'SUB'>('ALL');
   const [qualityFilter, setQualityFilter] = useState<'ALL' | '4K' | '1080P' | 'WEBDL' | 'HDTC'>('ALL');
   const [yearFilter, setYearFilter] = useState<'ALL' | '2026' | '2025' | 'OLDER'>('ALL');
@@ -175,10 +148,12 @@ export default function App() {
     }
   });
 
-  // Catalog Items State
+  // Catalog Items State & Live MovieBox Bangladesh Home Feed (Exact BD Banners + Shelves)
   const [items, setItems] = useState<MovieCardItem[]>(() =>
     sortItemsByHotAndHype(INITIAL_FALLBACK_MOVIES['/'])
   );
+  const [mbHomeBanners, setMbHomeBanners] = useState<MovieCardItem[]>([]);
+  const [homeShelves, setHomeShelves] = useState<HomeShelfSection[]>([]);
   const [loadingCatalog, setLoadingCatalog] = useState<boolean>(false);
   const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
 
@@ -189,10 +164,6 @@ export default function App() {
   const [liveClockNow, setLiveClockNow] = useState<number>(() => Date.now());
   const [showInstallModal, setShowInstallModal] = useState<boolean>(false);
   const [showRequestModal, setShowRequestModal] = useState<boolean>(false);
-  const [showLast24hModal, setShowLast24hModal] = useState<boolean>(false);
-  const [last24hFilter, setLast24hFilter] = useState<'ALL' | 'MOVIE' | 'SERIES' | 'ANIME'>('ALL');
-  const [requestPrefillTitle, setRequestPrefillTitle] = useState<string>('');
-  const [requestPrefillType, setRequestPrefillType] = useState<UserMovieRequest['type']>('MOVIE');
 
   // Silent Automatic Phone OS Push Notification State (No in-app popup clutter)
   const [serverNotifications, setServerNotifications] = useState<GlobalMovieNotification[]>([]);
@@ -206,18 +177,18 @@ export default function App() {
   });
   const pushedSetRef = useRef<Set<string>>(new Set(pushedPhoneNotifIds));
 
-  // Tick live clock every 20 seconds so upload times ("4 mins ago" -> "5 mins ago" -> "1 hour ago") update dynamically!
+  // Tick live clock every 3 minutes (avoids unnecessary 20s full-tree re-renders & lag)
   useEffect(() => {
     const clockTimer = window.setInterval(() => {
       setLiveClockNow(Date.now());
-    }, 20_000);
+    }, 180_000);
     return () => window.clearInterval(clockTimer);
   }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setShowSplashScreen(false);
-    }, 1350);
+    }, 700);
     return () => window.clearTimeout(timer);
   }, []);
 
@@ -322,30 +293,30 @@ export default function App() {
       return;
     }
 
-    const interleaveThreeSites = (pool: MovieCardItem[]): MovieCardItem[] => {
+    const interleaveTwoSites = (pool: MovieCardItem[]): MovieCardItem[] => {
       const mb = pool.filter((i) => i.path?.startsWith('/mb/'));
-      const mf = pool.filter((i) => i.path?.startsWith('/mf/'));
       const mlbd = pool.filter((i) => !i.path?.startsWith('/mb/') && !i.path?.startsWith('/mf/'));
       const out: MovieCardItem[] = [];
-      const maxLen = Math.max(mb.length, mlbd.length, mf.length);
+      const maxLen = Math.max(mb.length, mlbd.length);
       for (let i = 0; i < maxLen; i++) {
         if (i < mb.length) out.push(mb[i]);
         if (i < mlbd.length) out.push(mlbd[i]);
-        if (i < mf.length) out.push(mf[i]);
       }
-      return deduplicateMovieCards(out);
+      return deduplicateByExactPath(out);
     };
 
-    // Immediate local match across all 3 sites (loaded items + Top 10 + full multi-site catalog fallback)
+    // Immediate local match across MovieBox + MovieLinkBD (zero cross-site merging)
     const lower = q.toLowerCase();
     const allLocalSources: MovieCardItem[] = [
       ...items,
+      ...mbHomeBanners,
+      ...homeShelves.flatMap((s) => s.items || []),
       ...TOP_10_THIS_WEEK_ITEMS,
       ...Object.values(INITIAL_FALLBACK_MOVIES).flat(),
-    ];
-    const localInstant = interleaveThreeSites(
+    ].filter((item) => !item?.path?.startsWith('/mf/'));
+    const localInstant = interleaveTwoSites(
       allLocalSources.filter((item) => item?.title?.toLowerCase().includes(lower))
-    ).slice(0, 14);
+    ).slice(0, 24);
     if (localInstant.length > 0) {
       setSuggestions(localInstant);
     }
@@ -357,7 +328,7 @@ export default function App() {
         const params = new URLSearchParams({ q, node: activeNodeId });
         const data = await universalApiFetch(`/api/suggest?${params.toString()}`);
         if (!cancelled && data && Array.isArray(data.items) && data.items.length > 0) {
-          const mergedAllSites = interleaveThreeSites([...data.items, ...localInstant]).slice(0, 30);
+          const mergedAllSites = interleaveTwoSites([...data.items, ...localInstant]).slice(0, 60);
           setSuggestions(mergedAllSites);
         }
       } catch {
@@ -395,7 +366,13 @@ export default function App() {
         });
         const data = await universalApiFetch(`/api/catalog?${params.toString()}`);
         if (data && Array.isArray(data.items) && data.items.length > 0) {
-          setItems(normalizeMovieCardList(data.items));
+          const normalizedFresh = normalizeMovieCardList(data.items);
+          if (silent && path === '/' && page === 1 && !query) {
+            // Preserve all previous homepage items while surfacing brand-new uploads on top
+            setItems((prev) => deduplicateMovieCards([...normalizedFresh, ...prev]).slice(0, 140));
+          } else {
+            setItems(normalizedFresh);
+          }
           if (data.maxPage) setMaxPage(data.maxPage);
           if (!silent) setLoadingCatalog(false);
           return;
@@ -409,23 +386,85 @@ export default function App() {
     []
   );
 
+  // Fetch Live MovieBox Bangladesh Homepage (Exact BD Banner Image Slider + BD Home Shelves + MovieLinkBD Latest Shelf)
+  const fetchHomeFeed = useCallback(async (forceRefresh = false) => {
+    try {
+      const url = forceRefresh ? '/api/home-feed?refresh=1' : '/api/home-feed';
+      const data = await universalApiFetch(url);
+      if (data?.ok) {
+        if (Array.isArray(data.heroBanners) && data.heroBanners.length > 0) {
+          setMbHomeBanners(normalizeMovieCardList(data.heroBanners));
+        }
+        if (Array.isArray(data.homeShelves) && data.homeShelves.length > 0) {
+          setHomeShelves(
+            data.homeShelves.map((shelf: HomeShelfSection) => ({
+              ...shelf,
+              items: normalizeMovieCardList(shelf.items || []),
+            }))
+          );
+        }
+      }
+    } catch {
+      // ignore if offline
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchHomeFeed(false);
+  }, [fetchHomeFeed]);
+
   useEffect(() => {
     fetchCatalog(currentCategory.path, currentPage, submittedSearch, activeNodeId);
   }, [currentCategory.path, currentPage, submittedSearch, activeNodeId, fetchCatalog]);
 
-  // Automatic Real-Time Background Sync for New Movies & Episodes (Every 30s + App Foreground Wake)
+  // Real-Time Server-Sent Events (SSE) Auto-Sync from MovieBox HD & MovieLinkBD
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') return;
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/v1/events');
+      es.addEventListener('catalog_update', (ev: MessageEvent) => {
+        try {
+          const payload = JSON.parse(ev.data || '{}');
+          if (Array.isArray(payload?.newItems) && payload.newItems.length > 0) {
+            const freshNorm = normalizeMovieCardList(payload.newItems);
+            setLiveClockNow(Date.now());
+            setLatest3SiteUploads((prev) => deduplicateMovieCards([...freshNorm, ...prev]).slice(0, 100));
+            if (currentCategory.path === '/' && currentPage === 1 && !submittedSearch) {
+              setItems((prev) => deduplicateMovieCards([...freshNorm, ...prev]).slice(0, 140));
+            }
+          }
+        } catch {
+          // ignore malformed event payload
+        }
+      });
+    } catch {
+      // ignore if SSE unavailable
+    }
+    return () => {
+      try {
+        es?.close();
+      } catch {
+        // ignore
+      }
+    };
+  }, [currentCategory.path, currentPage, submittedSearch]);
+
+  // Lightweight Background Sync (Every 3 minutes — real-time SSE /api/v1/events already pushes instant updates!)
   useEffect(() => {
     const interval = setInterval(() => {
-      if (document.visibilityState === 'visible' && activeTab === 'browse') {
-        setLiveClockNow(Date.now());
-        fetchCatalog(currentCategory.path, currentPage, submittedSearch, activeNodeId, true, true);
-      }
-    }, 30_000);
-
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible' && activeTab === 'browse') {
+      if (document.visibilityState === 'visible' && activeTab === 'browse' && !selectedMovie) {
         setLiveClockNow(Date.now());
         fetchCatalog(currentCategory.path, currentPage, submittedSearch, activeNodeId, false, true);
+        if (currentCategory.path === '/' && currentPage === 1 && !submittedSearch) {
+          fetchHomeFeed(false);
+        }
+      }
+    }, 180_000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && activeTab === 'browse' && !selectedMovie) {
+        setLiveClockNow(Date.now());
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
@@ -434,12 +473,12 @@ export default function App() {
       clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [activeTab, currentCategory.path, currentPage, submittedSearch, activeNodeId, fetchCatalog]);
+  }, [activeTab, selectedMovie, currentCategory.path, currentPage, submittedSearch, activeNodeId, fetchCatalog, fetchHomeFeed]);
 
   // Prevent background page rubber-banding / scrolling when Fullscreen Movie Player or Modals are open
   // (Keep scrolling UNLOCKED when player is minimized to Floating Mini Player!)
   useEffect(() => {
-    if ((selectedMovie && !isMiniPlayer) || showInstallModal || showRequestModal || showLast24hModal) {
+    if ((selectedMovie && !isMiniPlayer) || showInstallModal || showRequestModal) {
       document.body.style.overflow = 'hidden';
     } else {
       document.body.style.overflow = '';
@@ -447,7 +486,7 @@ export default function App() {
     return () => {
       document.body.style.overflow = '';
     };
-  }, [selectedMovie, isMiniPlayer, showInstallModal, showRequestModal, showLast24hModal]);
+  }, [selectedMovie, isMiniPlayer, showInstallModal, showRequestModal]);
 
   useEffect(() => {
     pushedSetRef.current = new Set(pushedPhoneNotifIds);
@@ -544,7 +583,7 @@ export default function App() {
     fetchGlobalNotifications();
     const timer = window.setInterval(() => {
       fetchGlobalNotifications();
-    }, 25_000);
+    }, 120_000);
     return () => window.clearInterval(timer);
   }, [fetchGlobalNotifications]);
 
@@ -691,7 +730,7 @@ export default function App() {
   // Mobile / Browser Hardware Back Button Support: Minimize player to Floating Mini Player or close modal
   useEffect(() => {
     const anyModalOpen = Boolean(
-      (selectedMovie && !isMiniPlayer) || showInstallModal || showRequestModal || showLast24hModal
+      (selectedMovie && !isMiniPlayer) || showInstallModal || showRequestModal
     );
     if (anyModalOpen) {
       window.history.pushState({ cinepulseModal: true }, '');
@@ -699,8 +738,6 @@ export default function App() {
     const handlePopState = () => {
       if (selectedMovie && !isMiniPlayer) {
         setIsMiniPlayer(true);
-      } else if (showLast24hModal) {
-        setShowLast24hModal(false);
       } else if (showRequestModal) {
         setShowRequestModal(false);
       } else if (showInstallModal) {
@@ -709,7 +746,7 @@ export default function App() {
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [selectedMovie, isMiniPlayer, showInstallModal, showRequestModal, showLast24hModal]);
+  }, [selectedMovie, isMiniPlayer, showInstallModal, showRequestModal]);
 
   const saveRecentSearch = (term: string) => {
     const cleaned = term.trim();
@@ -732,7 +769,6 @@ export default function App() {
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = searchQuery.trim();
-    setSourceFilter('ALL');
     setSubmittedSearch(trimmed);
     if (trimmed) saveRecentSearch(trimmed);
     setCurrentPage(1);
@@ -741,7 +777,6 @@ export default function App() {
   };
 
   const handleTriggerActorSearch = (actorName: string) => {
-    setSourceFilter('ALL');
     setSearchQuery(actorName);
     setSubmittedSearch(actorName);
     saveRecentSearch(actorName);
@@ -854,24 +889,12 @@ export default function App() {
     }
   };
 
-  const sourceCounts = useMemo(() => {
-    const norm = normalizeMovieCardList(items, liveClockNow);
-    let mb = 0;
-    let mlbd = 0;
-    let mf = 0;
-    for (const it of norm) {
-      if (it.path?.startsWith('/mb/')) mb++;
-      else if (it.path?.startsWith('/mf/')) mf++;
-      else mlbd++;
-    }
-    return { total: norm.length, mb, mlbd, mf };
-  }, [items, liveClockNow]);
-
   const displayedItems = useMemo(() => {
-    let list = normalizeMovieCardList(items, liveClockNow);
+    let list = normalizeMovieCardList(items, liveClockNow).filter((i) => !i.path?.startsWith('/mf/'));
 
-    if (sourceFilter !== 'ALL') {
-      list = list.filter((i) => getCardSourceInfo(i.path).id === sourceFilter);
+    // When searching, return ALL content with ZERO client filters and ZERO cross-site merging
+    if (submittedSearch.trim()) {
+      return deduplicateByExactPath(list);
     }
 
     if (audioFilter !== 'ALL') {
@@ -919,9 +942,19 @@ export default function App() {
     }
 
     return list;
-  }, [items, sourceFilter, audioFilter, qualityFilter, yearFilter, sortBy, liveClockNow]);
+  }, [items, submittedSearch, audioFilter, qualityFilter, yearFilter, sortBy, liveClockNow]);
 
   const heroSlides = useMemo(() => {
+    // On Home (/), mirror MovieBox's EXACT live Bangladesh BD Banner Image Slider movies & artwork!
+    if (currentCategory.path === '/' && mbHomeBanners.length > 0) {
+      const validBanners = mbHomeBanners.filter(
+        (b) => (b.backdrop || b.poster) && !brokenImages[b.id]
+      );
+      if (validBanners.length > 0) {
+        return validBanners;
+      }
+    }
+
     const pool = normalizeMovieCardList(
       currentCategory.path === '/'
         ? [...TOP_10_THIS_WEEK_ITEMS, ...displayedItems, ...INITIAL_FALLBACK_MOVIES['/']]
@@ -963,7 +996,7 @@ export default function App() {
     }
 
     return interleavedHero.length > 0 ? interleavedHero.slice(0, 12) : displayedItems.slice(0, 12);
-  }, [displayedItems, brokenImages, currentCategory.path, liveClockNow]);
+  }, [mbHomeBanners, displayedItems, brokenImages, currentCategory.path, liveClockNow]);
 
   const [heroSlideIdx, setHeroSlideIdx] = useState(0);
   const heroTouchStartXRef = useRef<number | null>(null);
@@ -973,13 +1006,13 @@ export default function App() {
     setHeroSlideIdx(0);
   }, [currentCategory.path]);
 
-  // Auto-advance Hero Background Cover through Hot/Popular Movies one after another every 3.8s
+  // Auto-advance Hero Background Cover smoothly every 5.5s
   useEffect(() => {
     if (activeTab !== 'browse' || selectedMovie || submittedSearch || currentPage !== 1) return;
     if (heroSlides.length <= 1) return;
     const timer = window.setInterval(() => {
       setHeroSlideIdx((prev) => (prev + 1) % heroSlides.length);
-    }, 3800);
+    }, 5500);
     return () => window.clearInterval(timer);
   }, [activeTab, selectedMovie, submittedSearch, currentPage, heroSlides.length]);
 
@@ -1020,7 +1053,7 @@ export default function App() {
     return merged.slice(0, 10);
   }, [displayedItems, brokenImages, liveClockNow]);
 
-  // Last 24 Hours updated movies, series, and anime across all 3 sites
+  // Last 24 Hours updated movies, series, and anime
   const last24hItems = useMemo(() => {
     const recentPool: MovieCardItem[] = [];
     const seen = new Set<string>();
@@ -1049,45 +1082,16 @@ export default function App() {
       }
     }
     const mb = recentPool.filter((i) => i.path?.startsWith('/mb/'));
-    const mf = recentPool.filter((i) => i.path?.startsWith('/mf/'));
     const mlbd = recentPool.filter((i) => !i.path?.startsWith('/mb/') && !i.path?.startsWith('/mf/'));
     const interleaved: MovieCardItem[] = [];
-    const maxLen = Math.max(mb.length, mlbd.length, mf.length);
+    const maxLen = Math.max(mb.length, mlbd.length);
     for (let i = 0; i < maxLen; i++) {
       if (i < mlbd.length) interleaved.push(mlbd[i]);
       if (i < mb.length) interleaved.push(mb[i]);
-      if (i < mf.length) interleaved.push(mf[i]);
     }
-    const baseList = interleaved.length >= 8 ? interleaved : combined.slice(0, 36);
-    if (last24hFilter === 'ALL') return baseList;
-    if (last24hFilter === 'ANIME') return baseList.filter((i) => i.typeBadge === 'ANIME');
-    if (last24hFilter === 'SERIES') {
-      return baseList.filter((i) => i.typeBadge === 'SERIES' || i.typeBadge === 'DRAMA' || Boolean(i.episodePill));
-    }
-    return baseList.filter((i) => i.typeBadge === 'MOVIE' && !i.episodePill);
-  }, [latest3SiteUploads, items, last24hFilter, liveClockNow]);
-
-  // Automatically pre-warm active Hero slide + top visible movies in the background so clicking them plays in 0ms!
-  useEffect(() => {
-    if (spotlightItem?.path) {
-      prefetchMovieDetails(spotlightItem.path, spotlightItem.title, activeNodeId, true);
-    }
-    const timer = window.setTimeout(() => {
-      const toWarm = [
-        spotlightItem,
-        ...displayedItems.slice(0, 15),
-        ...top10ThisWeekItems.slice(0, 8),
-      ].filter(Boolean);
-      const seen = new Set<string>();
-      toWarm.forEach((m, idx) => {
-        if (m?.path && !seen.has(m.path)) {
-          seen.add(m.path);
-          prefetchMovieDetails(m.path, m.title, activeNodeId, idx < 4);
-        }
-      });
-    }, 40);
-    return () => window.clearTimeout(timer);
-  }, [spotlightItem, displayedItems, top10ThisWeekItems, activeNodeId]);
+    const baseList = interleaved.length >= 8 ? interleaved : combined.filter((i) => !i.path?.startsWith('/mf/')).slice(0, 36);
+    return baseList;
+  }, [latest3SiteUploads, items, liveClockNow]);
 
   const isMovieInWatchlist = useCallback(
     (movie: MovieCardItem | null) => {
@@ -1436,26 +1440,45 @@ export default function App() {
                 {(loadingSuggestions || loadingCatalog) && (
                   <div className="flex items-center gap-2 py-2 text-xs text-gray-400">
                     <Loader2 className="w-4 h-4 animate-spin text-white" />
-                    <span>Searching MovieBox, MovieLinkBD & MyFlixBD...</span>
+                    <span>Searching...</span>
                   </div>
                 )}
 
                 {(() => {
                   const activeQ = (searchQuery.trim() || submittedSearch.trim()).toLowerCase();
-                  const rawPool = activeQ
-                    ? deduplicateMovieCards([
-                        ...normalizeMovieCardList(suggestions, liveClockNow),
-                        ...displayedItems.filter((i) =>
-                          i.title.toLowerCase().includes(activeQ)
-                        ),
-                        ...displayedItems,
-                      ])
-                    : deduplicateMovieCards([
+                  const isCatalogSyncedToQuery =
+                    Boolean(activeQ) && submittedSearch.trim().toLowerCase() === activeQ;
+
+                  const combinedMatches = activeQ
+                    ? (() => {
+                        const catalogMatches = isCatalogSyncedToQuery
+                          ? displayedItems
+                          : displayedItems.filter((i) =>
+                              i.title.toLowerCase().includes(activeQ)
+                            );
+                        const raw = deduplicateByExactPath([
+                          ...normalizeMovieCardList(catalogMatches, liveClockNow),
+                          ...normalizeMovieCardList(suggestions, liveClockNow),
+                        ]);
+                        const mbRes = raw.filter((i) => i.path?.startsWith('/mb/'));
+                        const mlbdRes = raw.filter(
+                          (i) => !i.path?.startsWith('/mb/') && !i.path?.startsWith('/mf/')
+                        );
+                        const interleaved: MovieCardItem[] = [];
+                        const maxLen = Math.max(mbRes.length, mlbdRes.length);
+                        for (let i = 0; i < maxLen; i++) {
+                          if (i < mbRes.length) interleaved.push(mbRes[i]);
+                          if (i < mlbdRes.length) interleaved.push(mlbdRes[i]);
+                        }
+                        return interleaved;
+                      })()
+                    : deduplicateByExactPath([
+                        ...(homeShelves[0]?.items || []),
                         ...displayedItems.slice(0, 24),
                         ...normalizeMovieCardList(TOP_10_THIS_WEEK_ITEMS, liveClockNow),
                       ]);
 
-                  const filteredRows = rawPool.filter((item) => {
+                  const filteredRows = combinedMatches.filter((item) => {
                     if (searchTabFilter === 'ALL') return true;
                     const t = `${item.title} ${item.typeBadge}`.toLowerCase();
                     if (searchTabFilter === 'SHORT_TV') {
@@ -1482,158 +1505,132 @@ export default function App() {
                   }
 
                   return (
-                    <div className="divide-y divide-white/[0.04]">
-                      {filteredRows.slice(0, 40).map((item, idx) => {
-                        const hasBrokenImg = brokenImages[item.id] || !item.poster;
-                        const langShort = formatShortLanguage(item.language);
-                        const yearMatch = item.title.match(/\b(20\d{2}|19\d{2})\b/);
-                        const yearStr = yearMatch ? yearMatch[1] : '2026';
-                        const isSeriesItem =
-                          item.typeBadge === 'SERIES' ||
-                          item.typeBadge === 'ANIME' ||
-                          item.typeBadge === 'DRAMA' ||
-                          Boolean(item.episodePill) ||
-                          /\bS0?\d|\bSeason|\bEp/i.test(item.title);
+                    <div className="space-y-2">
+                      {activeQ && filteredRows.length > 0 && (
+                        <div className="flex items-center justify-between text-[11px] text-gray-400 px-1 pb-1 border-b border-white/[0.06]">
+                          <span className="font-semibold text-gray-300">
+                            মোট {filteredRows.length}টি ফলাফল
+                          </span>
+                        </div>
+                      )}
 
-                        const cleanBaseTitle = item.title
-                          .replace(/\s*\(\d{4}\)/g, '')
-                          .replace(
-                            /\s*(?:1080p|720p|480p|4K|WEB-DL|WEBRip|Full HD|HDTC|BluRay|Dual Audio|Multi Audio).*$/i,
-                            ''
-                          )
-                          .trim();
-                        const seasonMatch = item.title.match(
-                          /\b(S\d+(?:-S?\d+)?|Season\s*\d+)\b/i
-                        );
-                        const seasonSuffix = seasonMatch ? ` ${seasonMatch[1].toUpperCase()}` : '';
-                        const hasBracketLang = /\[[^\]]+\]/.test(cleanBaseTitle);
-                        const bracketLang =
-                          !hasBracketLang && langShort && langShort !== 'English'
-                            ? ` [${langShort}]`
-                            : '';
-                        const baseWithoutSeason = cleanBaseTitle
-                          .replace(/\b(S\d+(?:-S?\d+)?|Season\s*\d+)\b/gi, '')
-                          .trim();
-                        const rowTitle = `${baseWithoutSeason || item.title}${bracketLang}${seasonSuffix}`;
+                      <div className="divide-y divide-white/[0.04]">
+                        {filteredRows.slice(0, 80).map((item, idx) => {
+                          const hasBrokenImg = brokenImages[item.id] || !item.poster;
+                          const langShort = formatShortLanguage(item.language);
+                          const yearMatch = item.title.match(/\b(20\d{2}|19\d{2})\b/);
+                          const yearStr = yearMatch ? yearMatch[1] : '2026';
+                          const isSeriesItem =
+                            item.typeBadge === 'SERIES' ||
+                            item.typeBadge === 'ANIME' ||
+                            item.typeBadge === 'DRAMA' ||
+                            Boolean(item.episodePill) ||
+                            /\bS0?\d|\bSeason|\bEp/i.test(item.title);
 
-                        const isAnime =
-                          item.typeBadge === 'ANIME' ||
-                          /anime|tower of god|one piece|naruto|solo|bleach|demon|dragon|high school|garden of words|black torch|overgeared|tomb raider/i.test(
-                            item.title
-                          );
-                        const genreLabel = isAnime
-                          ? 'Anime'
-                          : /action|war|pushpa|jailer|toofan|marco|king|raider/i.test(item.title)
-                          ? 'Action'
-                          : /thriller|crime|mirzapur|squid/i.test(item.title)
-                          ? 'Thriller'
-                          : /romance|love|heart/i.test(item.title)
-                          ? 'Romance'
-                          : isSeriesItem
-                          ? 'Drama'
-                          : 'Movie';
+                          const rowTitle = item.title;
 
-                        const viewsLabel =
-                          item.views && item.views !== 'Live' ? item.views : '1.3M';
-                        const middleMeta =
-                          idx % 4 === 2
-                            ? `Same Actor • ${viewsLabel}`
-                            : idx % 4 === 3
-                            ? `Also Watched • ${viewsLabel}`
-                            : isAnime
-                            ? 'Japan'
-                            : langShort === 'Bangla'
-                            ? 'Bangladesh'
-                            : langShort === 'Korean'
-                            ? 'Korea'
-                            : 'India';
+                          const isAnime =
+                            item.typeBadge === 'ANIME' ||
+                            /anime|tower of god|one piece|naruto|solo|bleach|demon|dragon|high school|garden of words|black torch|overgeared|tomb raider/i.test(
+                              item.title
+                            );
+                          const genreLabel = isAnime
+                            ? 'Anime'
+                            : /action|war|pushpa|jailer|toofan|marco|king|raider/i.test(item.title)
+                            ? 'Action'
+                            : /thriller|crime|mirzapur|squid/i.test(item.title)
+                            ? 'Thriller'
+                            : /romance|love|heart/i.test(item.title)
+                            ? 'Romance'
+                            : isSeriesItem
+                            ? 'Series'
+                            : 'Movie';
 
-                        const ratingVal = item.rating
-                          ? Number(item.rating).toFixed(1)
-                          : (7.1 + ((idx * 3) % 18) / 10).toFixed(1);
+                          const ratingVal = item.rating ? Number(item.rating).toFixed(1) : '';
 
-                        return (
-                          <div
-                            key={`${item.path}-${item.id}-${idx}`}
-                            onMouseEnter={() =>
-                              prefetchMovieDetails(item.path, item.title, activeNodeId, true)
-                            }
-                            onTouchStart={() =>
-                              prefetchMovieDetails(item.path, item.title, activeNodeId, true)
-                            }
-                            onClick={() => {
-                              if (searchQuery.trim()) {
-                                saveRecentSearch(searchQuery.trim());
+                          return (
+                            <div
+                              key={`${item.path}-${idx}`}
+                              onMouseEnter={() =>
+                                prefetchMovieDetails(item.path, item.title, activeNodeId, false)
                               }
-                              setSelectedMovie(item);
-                            }}
-                            className="group py-2.5 flex items-center gap-3.5 cursor-pointer hover:bg-white/[0.03] rounded-xl px-1 transition-colors"
-                          >
-                            {/* Left Vertical Poster with Bottom Language Strip */}
-                            <div className="relative w-[62px] h-[84px] sm:w-[68px] sm:h-[92px] rounded-lg overflow-hidden bg-[#161920] shrink-0">
-                              {!hasBrokenImg ? (
-                                <img
-                                  src={item.poster}
-                                  alt={item.title}
-                                  referrerPolicy="no-referrer"
-                                  loading="lazy"
-                                  onError={() =>
-                                    setBrokenImages((prev) => ({ ...prev, [item.id]: true }))
-                                  }
-                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                                />
-                              ) : (
-                                <div className="w-full h-full flex items-center justify-center">
-                                  <Film className="w-6 h-6 text-gray-500" />
-                                </div>
-                              )}
-
-                              {langShort && (
-                                <div className="absolute inset-x-0 bottom-0 bg-black/65 py-0.5 text-center text-[11px] font-medium text-gray-100 leading-tight truncate px-1">
-                                  {langShort}
-                                </div>
-                              )}
-                            </div>
-
-                            {/* Middle Column: Title + TV/Film | ★ Rating | Year | Region/Context | Genre */}
-                            <div className="flex-1 min-w-0 pr-1">
-                              <h3 className="text-[15px] sm:text-base font-medium text-white truncate mb-1.5 group-hover:text-gray-100">
-                                {rowTitle}
-                              </h3>
-                              <div className="flex items-center gap-1.5 text-xs sm:text-[13px] text-gray-400 truncate">
-                                {isSeriesItem ? (
-                                  <Tv className="w-3.5 h-3.5 text-gray-300 shrink-0" />
+                              onClick={() => {
+                                if (searchQuery.trim()) {
+                                  saveRecentSearch(searchQuery.trim());
+                                }
+                                setSelectedMovie(item);
+                              }}
+                              className="group py-2.5 flex items-center gap-3.5 cursor-pointer hover:bg-white/[0.03] rounded-xl px-1 transition-colors"
+                            >
+                              {/* Left Vertical Poster (100% Clean, Zero Overlay Text) */}
+                              <div className="relative w-[62px] h-[84px] sm:w-[68px] sm:h-[92px] rounded-lg overflow-hidden bg-[#161920] shrink-0">
+                                {!hasBrokenImg ? (
+                                  <img
+                                    src={item.poster}
+                                    alt={item.title}
+                                    referrerPolicy="no-referrer"
+                                    loading="lazy"
+                                    decoding="async"
+                                    onError={() =>
+                                      setBrokenImages((prev) => ({ ...prev, [item.id]: true }))
+                                    }
+                                    className="w-full h-full object-cover"
+                                  />
                                 ) : (
-                                  <Film className="w-3.5 h-3.5 text-gray-300 shrink-0" />
+                                  <div className="w-full h-full flex items-center justify-center">
+                                    <Film className="w-6 h-6 text-gray-500" />
+                                  </div>
                                 )}
-                                <span className="text-gray-600">|</span>
-                                <span className="inline-flex items-center gap-1 text-amber-400 font-medium shrink-0">
-                                  <Star className="w-3.5 h-3.5 fill-current" />
-                                  <span>{ratingVal}</span>
-                                </span>
-                                <span className="text-gray-600">|</span>
-                                <span className="shrink-0">{yearStr}</span>
-                                <span className="text-gray-600">|</span>
-                                <span className="truncate">{middleMeta}</span>
-                                <span className="text-gray-600">|</span>
-                                <span className="truncate">{genreLabel}</span>
+                              </div>
+
+                              {/* Middle Column: Clean Title + Meta */}
+                              <div className="flex-1 min-w-0 pr-1">
+                                <h3 className="text-[14px] sm:text-[15px] font-medium text-white truncate mb-1.5 group-hover:text-gray-100">
+                                  {rowTitle}
+                                </h3>
+                                <div className="flex items-center gap-1.5 text-xs sm:text-[13px] text-gray-400 truncate">
+                                  {isSeriesItem ? (
+                                    <Tv className="w-3.5 h-3.5 text-gray-300 shrink-0" />
+                                  ) : (
+                                    <Film className="w-3.5 h-3.5 text-gray-300 shrink-0" />
+                                  )}
+                                  {ratingVal && (
+                                    <>
+                                      <span className="text-gray-600">|</span>
+                                      <span className="inline-flex items-center gap-1 text-amber-400 font-medium shrink-0">
+                                        <Star className="w-3.5 h-3.5 fill-current" />
+                                        <span>{ratingVal}</span>
+                                      </span>
+                                    </>
+                                  )}
+                                  <span className="text-gray-600">|</span>
+                                  <span className="shrink-0">{yearStr}</span>
+                                  {langShort && (
+                                    <>
+                                      <span className="text-gray-600">|</span>
+                                      <span className="truncate">{langShort}</span>
+                                    </>
+                                  )}
+                                  <span className="text-gray-600">|</span>
+                                  <span className="truncate">{genreLabel}</span>
+                                </div>
+                              </div>
+
+                              {/* Right Circular Light Play Button */}
+                              <div className="w-8 h-8 rounded-full bg-[#d1d5db] group-hover:bg-white text-[#0f1115] flex items-center justify-center shrink-0 transition-transform active:scale-95">
+                                <Play className="w-4 h-4 fill-current ml-0.5" />
                               </div>
                             </div>
-
-                            {/* Right Circular Light Play Button */}
-                            <div className="w-8 h-8 rounded-full bg-[#d1d5db] group-hover:bg-white text-[#0f1115] flex items-center justify-center shrink-0 transition-transform active:scale-95">
-                              <Play className="w-4 h-4 fill-current ml-0.5" />
-                            </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      </div>
                     </div>
                   );
                 })()}
               </section>
             ) : (
               <>
-            {/* Clean Cinema Hero Cover + MovieBox-Style Bottom Compact Cards (Page 1 & Not Searching) */}
+            {/* Exact MovieBox Live Bangladesh Image Slider + Bottom Compact Cards (Page 1 & Not Searching) */}
             {!submittedSearch && currentPage === 1 && spotlightItem && (
               <section className="select-none">
                 <div
@@ -1658,18 +1655,20 @@ export default function App() {
                       }
                     }
                   }}
-                  className="relative aspect-[16/10] sm:aspect-[21/9] w-full rounded-2xl sm:rounded-3xl bg-[#0a0a0a] border border-white/10 cursor-pointer overflow-hidden shadow-2xl group"
+                  className="relative aspect-[16/9] sm:aspect-[21/9] w-full rounded-2xl sm:rounded-3xl bg-[#0a0a0a] border border-white/10 cursor-pointer overflow-hidden shadow-2xl group"
                 >
-                  {spotlightItem.poster && !brokenImages[spotlightItem.id] ? (
+                  {(spotlightItem.backdrop || spotlightItem.poster) && !brokenImages[spotlightItem.id] ? (
                     <img
                       key={spotlightItem.id}
-                      src={spotlightItem.poster}
+                      src={spotlightItem.backdrop || spotlightItem.poster}
                       alt={spotlightItem.title}
                       referrerPolicy="no-referrer"
                       onError={() =>
                         setBrokenImages((prev) => ({ ...prev, [spotlightItem.id]: true }))
                       }
-                      className="w-full h-full object-cover object-top group-hover:scale-105 transition-transform duration-500"
+                      className={`w-full h-full object-cover ${
+                        spotlightItem.backdrop ? 'object-center' : 'object-top'
+                      } group-hover:scale-105 transition-transform duration-500`}
                     />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-[#1a0b0b] to-[#050505]">
@@ -1678,7 +1677,59 @@ export default function App() {
                   )}
 
                   {/* Smooth bottom fade into the compact card strip */}
-                  <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-[#050505] via-[#050505]/55 to-transparent pointer-events-none" />
+                  <div className="absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-t from-[#050505] via-[#050505]/45 to-transparent pointer-events-none" />
+
+                  {/* Prev / Next Arrows for Slider */}
+                  {heroSlides.length > 1 && (
+                    <>
+                      <button
+                        type="button"
+                        aria-label="Previous slide"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setHeroSlideIdx(
+                            (prev) => (prev - 1 + heroSlides.length) % heroSlides.length
+                          );
+                        }}
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full bg-black/55 hover:bg-black/80 text-white border border-white/15 flex items-center justify-center backdrop-blur-xs transition-opacity opacity-80 sm:opacity-0 sm:group-hover:opacity-100"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Next slide"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setHeroSlideIdx((prev) => (prev + 1) % heroSlides.length);
+                        }}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full bg-black/55 hover:bg-black/80 text-white border border-white/15 flex items-center justify-center backdrop-blur-xs transition-opacity opacity-80 sm:opacity-0 sm:group-hover:opacity-100"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </>
+                  )}
+
+                  {/* Slide Indicator Dots (top-right inside banner) */}
+                  {heroSlides.length > 1 && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute top-3 right-3 z-20 flex items-center gap-1.5 bg-black/45 backdrop-blur-xs px-2.5 py-1.5 rounded-full border border-white/10"
+                    >
+                      {heroSlides.slice(0, 12).map((slide, sIdx) => (
+                        <button
+                          key={slide.path + sIdx}
+                          type="button"
+                          aria-label={`Slide ${sIdx + 1}`}
+                          onClick={() => setHeroSlideIdx(sIdx)}
+                          className={`h-1.5 rounded-full transition-all cursor-pointer ${
+                            sIdx === safeSlideIdx
+                              ? 'w-5 bg-[#00e68a]'
+                              : 'w-1.5 bg-white/45 hover:bg-white/75'
+                          }`}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* MovieBox-Style Compact Floating Cards Strip Under Cover */}
@@ -1700,7 +1751,7 @@ export default function App() {
                         ? 'Action'
                         : /drama|love|akka|bachelor/i.test(card.title)
                         ? 'Drama'
-                        : 'Thriller';
+                        : 'Movie';
                     const cleanShortTitle = card.title
                       .replace(/\s*\(\d{4}\).*$/i, '')
                       .replace(/\s*S\d+.*$/i, '')
@@ -1765,7 +1816,82 @@ export default function App() {
               </section>
             )}
 
-            {/* PRIMARY SECTION: ALL MOVIES & SERIES CATALOG GRID (Moved up for immediate access!) */}
+            {/* LIVE HOMEPAGE SHELVES (100% Clean Posters — Zero Overlays, Zero Site Names) */}
+            {!submittedSearch && currentPage === 1 && currentCategory.path === '/' && homeShelves.length > 0 && (
+              <div className="space-y-6">
+                {homeShelves.map((shelf) => {
+                  const shelfItems = (shelf.items || []).filter((it) => it && it.path && it.title);
+                  if (shelfItems.length === 0) return null;
+
+                  return (
+                    <section key={shelf.id} className="space-y-2.5">
+                      <div className="flex items-center justify-between gap-2 px-0.5">
+                        <h2 className="text-[15px] sm:text-lg font-extrabold text-white tracking-tight truncate">
+                          {shelf.title}
+                        </h2>
+                        <span className="text-[11px] text-gray-400 font-semibold shrink-0">
+                          {shelfItems.length} titles
+                        </span>
+                      </div>
+
+                      <div className="flex items-stretch gap-2.5 sm:gap-3 overflow-x-auto no-scrollbar pb-1">
+                        {shelfItems.map((item, sIdx) => {
+                          const hasBrokenImg = brokenImages[item.id] || !item.poster;
+                          const langShort = formatShortLanguage(item.language);
+                          return (
+                            <article
+                              key={`${shelf.id}-${item.path}-${sIdx}`}
+                              onMouseEnter={() =>
+                                prefetchMovieDetails(item.path, item.title, activeNodeId, false)
+                              }
+                              onClick={() => setSelectedMovie(item)}
+                              className="w-[122px] sm:w-[148px] shrink-0 rounded-2xl overflow-hidden bg-[#0a0a0a] border border-white/[0.08] hover:border-[#dc2626]/65 cursor-pointer group flex flex-col transition-colors"
+                            >
+                              <div className="relative aspect-[2/3] w-full bg-[#050505] overflow-hidden">
+                                {!hasBrokenImg ? (
+                                  <img
+                                    src={item.poster}
+                                    alt={item.title}
+                                    referrerPolicy="no-referrer"
+                                    loading="lazy"
+                                    decoding="async"
+                                    onError={() =>
+                                      setBrokenImages((prev) => ({ ...prev, [item.id]: true }))
+                                    }
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center p-2 text-center">
+                                    <Film className="w-6 h-6 text-gray-500" />
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="p-2 flex-1 flex flex-col justify-between gap-1">
+                                <h3 className="text-[11px] sm:text-xs font-bold text-gray-100 line-clamp-2 leading-snug group-hover:text-[#ef4444] transition-colors">
+                                  {item.title}
+                                </h3>
+                                <div className="flex items-center justify-between gap-1 text-[10px] text-gray-400">
+                                  <span className="truncate">{item.episodePill || langShort}</span>
+                                  {item.rating && (
+                                    <span className="text-amber-400 font-bold flex items-center gap-0.5 shrink-0">
+                                      <Star className="w-2.5 h-2.5 fill-current" />
+                                      <span>{item.rating}</span>
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* PRIMARY SECTION: ALL MOVIES & SERIES CATALOG GRID */}
             <section className="space-y-3.5">
               {/* Section Header + Filter Toolbar */}
               <div className="rounded-2xl bg-[#0a0a0a] border border-white/[0.08] p-3 sm:p-4 space-y-3">
@@ -1781,52 +1907,6 @@ export default function App() {
                   <span className="text-xs text-gray-400 font-mono tabular-nums shrink-0">
                     Page {currentPage}/{maxPage}
                   </span>
-                </div>
-
-                {/* 3-Site Source Hub Bar (MovieBox HD + MovieLinkBD + MyFlixBD) */}
-                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5 border-b border-white/[0.06]">
-                  {[
-                    {
-                      id: 'ALL',
-                      label: 'All 3 Sites (সব ৩ সাইট)',
-                      count: sourceCounts.total,
-                      activeCls: 'bg-[#dc2626] text-white border-[#ef4444]',
-                    },
-                    {
-                      id: 'MOVIEBOX',
-                      label: 'MovieBox HD',
-                      count: sourceCounts.mb,
-                      activeCls: 'bg-emerald-600 text-white border-emerald-400',
-                    },
-                    {
-                      id: 'MOVIELINKBD',
-                      label: 'MovieLinkBD',
-                      count: sourceCounts.mlbd,
-                      activeCls: 'bg-[#dc2626] text-white border-red-400',
-                    },
-                    {
-                      id: 'MYFLIX',
-                      label: 'MyFlixBD',
-                      count: sourceCounts.mf,
-                      activeCls: 'bg-purple-600 text-white border-purple-400',
-                    },
-                  ].map((srcTab) => (
-                    <button
-                      key={srcTab.id}
-                      type="button"
-                      onClick={() => setSourceFilter(srcTab.id as any)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-extrabold whitespace-nowrap shrink-0 border flex items-center gap-1.5 transition-all ${
-                        sourceFilter === srcTab.id
-                          ? `${srcTab.activeCls} shadow-md`
-                          : 'bg-[#141414] text-gray-300 hover:text-white border-white/10'
-                      }`}
-                    >
-                      <span>{srcTab.label}</span>
-                      <span className="px-1.5 py-0.2 rounded-md bg-black/40 text-[10px] font-mono tabular-nums">
-                        {srcTab.count}
-                      </span>
-                    </button>
-                  ))}
                 </div>
 
                 {/* Clean Audio Filter Segmented Controls + Quality/Sort Selectors */}
@@ -1897,7 +1977,7 @@ export default function App() {
                 </div>
               )}
 
-              {/* 3-Column Mobile / 5-Column Desktop Ultra-Clean Poster Grid */}
+              {/* 3-Column Mobile / 5-Column Desktop Ultra-Clean Poster Grid (Zero Overlays on Posters) */}
               {displayedItems.length === 0 ? (
                 <div className="rounded-3xl bg-[#0a0a0a] border border-white/[0.08] p-10 text-center space-y-3">
                   <Film className="w-10 h-10 text-gray-500 mx-auto" />
@@ -1905,7 +1985,6 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => {
-                      setSourceFilter('ALL');
                       setAudioFilter('ALL');
                       setQualityFilter('ALL');
                       setYearFilter('ALL');
@@ -1920,18 +1999,15 @@ export default function App() {
               ) : (
                 <div className="grid grid-cols-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2.5 sm:gap-4">
                   {displayedItems.map((item) => {
-                    const isSaved = isMovieInWatchlist(item);
                     const hasBrokenImg = brokenImages[item.id] || !item.poster;
-                    const isJustUploaded = isUploadedWithinMinutes(item.timeAgo);
-                    const srcInfo = getCardSourceInfo(item.path);
+                    const langShort = formatShortLanguage(item.language);
 
                     return (
                       <article
                         key={item.path + item.title}
-                        onMouseEnter={() => prefetchMovieDetails(item.path, item.title, activeNodeId, true)}
-                        onTouchStart={() => prefetchMovieDetails(item.path, item.title, activeNodeId, true)}
+                        onMouseEnter={() => prefetchMovieDetails(item.path, item.title, activeNodeId, false)}
                         onClick={() => setSelectedMovie(item)}
-                        className="group rounded-2xl overflow-hidden bg-[#0a0a0a] border border-white/[0.08] hover:border-[#dc2626]/65 transition-all flex flex-col cursor-pointer shadow-sm"
+                        className="group rounded-2xl overflow-hidden bg-[#0a0a0a] border border-white/[0.08] hover:border-[#dc2626]/65 transition-colors flex flex-col cursor-pointer"
                       >
                         <div className="relative aspect-[2/3] w-full bg-[#050505] overflow-hidden">
                           {!hasBrokenImg ? (
@@ -1940,10 +2016,11 @@ export default function App() {
                               alt={item.title}
                               referrerPolicy="no-referrer"
                               loading="lazy"
+                              decoding="async"
                               onError={() =>
                                 setBrokenImages((prev) => ({ ...prev, [item.id]: true }))
                               }
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              className="w-full h-full object-cover"
                             />
                           ) : (
                             <div className="w-full h-full flex flex-col items-center justify-center p-3 text-center">
@@ -1953,63 +2030,22 @@ export default function App() {
                               </span>
                             </div>
                           )}
-
-                          {/* Top-Right Language + Source Tag */}
-                          <div className="absolute top-1.5 right-1.5 flex flex-col items-end gap-1">
-                            <span className="px-1.5 py-0.5 rounded-md bg-black/75 backdrop-blur-xs text-[9px] sm:text-[10px] font-bold text-white border border-white/10">
-                              {formatShortLanguage(item.language)}
-                            </span>
-                            <span
-                              className={`px-1.5 py-0.2 rounded text-[8px] sm:text-[9px] font-extrabold border ${srcInfo.badgeClass}`}
-                            >
-                              {srcInfo.label}
-                            </span>
-                          </div>
-
-                          {/* Top-Left Bookmark / HOT */}
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleToggleWatchlist(item);
-                            }}
-                            aria-label="Save to list"
-                            className={`absolute top-1.5 left-1.5 w-6 h-6 rounded-lg backdrop-blur-xs flex items-center justify-center transition-colors ${
-                              isSaved
-                                ? 'bg-[#dc2626] text-white'
-                                : 'bg-black/60 text-white/85 hover:text-white'
-                            }`}
-                          >
-                            <Bookmark className={`w-3 h-3 ${isSaved ? 'fill-current' : ''}`} />
-                          </button>
-
-                          {/* Bottom Scrim: Episode/Quality + Star Rating */}
-                          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/60 to-transparent px-2 pt-5 pb-1.5 flex items-center justify-between gap-1 text-[10px]">
-                            <span className="font-bold text-[#ef4444] truncate">
-                              {item.episodePill || item.quality}
-                            </span>
-                            <span className="text-amber-400 font-bold flex items-center gap-0.5 shrink-0">
-                              <Star className="w-2.5 h-2.5 fill-current" />
-                              <span>{item.rating || '9.0'}</span>
-                            </span>
-                          </div>
                         </div>
 
                         <div className="p-2 sm:p-2.5 flex-1 flex flex-col justify-between space-y-1">
                           <h3 className="text-xs sm:text-sm font-bold text-gray-100 truncate group-hover:text-[#ef4444] transition-colors">
                             {item.title}
                           </h3>
-                          <div className="flex items-center justify-between text-[10px] text-gray-400">
-                            <span
-                              className={`font-medium truncate ${
-                                isJustUploaded ? 'text-[#ef4444]' : 'text-amber-300/90'
-                              }`}
-                            >
-                              {item.timeAgo}
+                          <div className="flex items-center justify-between gap-1 text-[10px] text-gray-400">
+                            <span className="truncate">
+                              {item.episodePill || langShort}
                             </span>
-                            <span className="font-mono tabular-nums text-gray-400 shrink-0 hidden xs:inline">
-                              {item.views}
-                            </span>
+                            {item.rating && (
+                              <span className="text-amber-400 font-bold flex items-center gap-0.5 shrink-0">
+                                <Star className="w-2.5 h-2.5 fill-current" />
+                                <span>{item.rating}</span>
+                              </span>
+                            )}
                           </div>
                         </div>
                       </article>
@@ -2018,7 +2054,7 @@ export default function App() {
                 </div>
               )}
 
-              {/* 🏆 TOP 10 THIS WEEK RAIL (Cleanly organized below main grid on Page 1) */}
+              {/* 🏆 TOP 10 THIS WEEK RAIL (Clean Posters) */}
               {!submittedSearch && currentPage === 1 && (
                 <div className="pt-4 space-y-3">
                   <div className="flex items-center justify-between">
@@ -2042,10 +2078,9 @@ export default function App() {
                     {top10ThisWeekItems.map((item, idx) => (
                       <div
                         key={item.path + idx}
-                        onMouseEnter={() => prefetchMovieDetails(item.path, item.title, activeNodeId, true)}
-                        onTouchStart={() => prefetchMovieDetails(item.path, item.title, activeNodeId, true)}
+                        onMouseEnter={() => prefetchMovieDetails(item.path, item.title, activeNodeId, false)}
                         onClick={() => setSelectedMovie(item)}
-                        className="w-[136px] sm:w-[162px] shrink-0 rounded-2xl overflow-hidden bg-[#0a0a0a] border border-white/[0.08] hover:border-[#dc2626]/60 cursor-pointer group flex flex-col transition-all"
+                        className="w-[136px] sm:w-[162px] shrink-0 rounded-2xl overflow-hidden bg-[#0a0a0a] border border-white/[0.08] hover:border-[#dc2626]/60 cursor-pointer group flex flex-col transition-colors"
                       >
                         <div className="relative aspect-[2/3] w-full bg-[#050505] overflow-hidden">
                           {item.poster && !brokenImages[item.id] ? (
@@ -2054,41 +2089,30 @@ export default function App() {
                               alt={item.title}
                               referrerPolicy="no-referrer"
                               loading="lazy"
+                              decoding="async"
                               onError={() =>
                                 setBrokenImages((prev) => ({ ...prev, [item.id]: true }))
                               }
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              className="w-full h-full object-cover"
                             />
                           ) : (
                             <div className="w-full h-full flex items-center justify-center">
                               <Film className="w-8 h-8 text-gray-600" />
                             </div>
                           )}
-
-                          <span className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-[#dc2626] text-white text-[10px] font-black shadow">
-                            #{idx + 1}
-                          </span>
-
-                          <span className="absolute top-2 right-2 px-1.5 py-0.5 rounded-md bg-black/75 text-[9px] font-semibold text-white">
-                            {formatShortLanguage(item.language)}
-                          </span>
-
-                          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/45 to-transparent px-2 pt-4 pb-1.5 flex items-center justify-between text-[10px]">
-                            <span className="font-semibold text-[#ef4444] truncate">
-                              {item.episodePill || item.quality}
-                            </span>
-                            <span className="text-amber-400 font-bold flex items-center gap-0.5">
-                              <Star className="w-2.5 h-2.5 fill-current" />
-                              {item.rating || '9.3'}
-                            </span>
-                          </div>
                         </div>
 
                         <div className="p-2 space-y-0.5">
                           <h3 className="text-xs font-bold text-gray-100 truncate group-hover:text-[#ef4444]">
-                            {item.title}
+                            #{idx + 1} · {item.title}
                           </h3>
-                          <p className="text-[10px] text-amber-300/90 truncate">{item.timeAgo}</p>
+                          <div className="flex items-center justify-between text-[10px] text-gray-400">
+                            <span className="truncate">{formatShortLanguage(item.language)}</span>
+                            <span className="text-amber-400 font-bold flex items-center gap-0.5 shrink-0">
+                              <Star className="w-2.5 h-2.5 fill-current" />
+                              {item.rating || '9.0'}
+                            </span>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -2199,19 +2223,9 @@ export default function App() {
                             alt={up.title}
                             referrerPolicy="no-referrer"
                             loading="lazy"
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            decoding="async"
+                            className="w-full h-full object-cover"
                           />
-                          <div
-                            title={up.fullDate}
-                            className="absolute top-2 left-2 rounded-lg overflow-hidden shadow-lg border border-white/20 text-center min-w-[38px]"
-                          >
-                            <div className="bg-[#dc2626] text-white text-[8px] font-black uppercase py-0.5 px-1.5">
-                              {up.month}
-                            </div>
-                            <div className="bg-black/85 text-white text-xs font-extrabold font-mono py-0.5 px-1.5">
-                              {up.day}
-                            </div>
-                          </div>
                         </div>
                         <div className="p-2">
                           <h3 className="text-xs font-bold text-gray-100 truncate group-hover:text-[#ef4444]">
@@ -2460,19 +2474,15 @@ export default function App() {
                             alt={item.title}
                             referrerPolicy="no-referrer"
                             loading="lazy"
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                            decoding="async"
+                            className="w-full h-full object-cover"
                           />
-                          <span className="absolute top-1.5 right-1.5 px-2 py-0.5 rounded bg-black/75 text-[10px] font-semibold text-white">
-                            {formatShortLanguage(item.language)}
-                          </span>
-                          <span className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-bold text-amber-300 flex items-center gap-1">
-                            <Clock className="w-2.5 h-2.5" />
-                            {normItem.timeAgo}
-                          </span>
                         </div>
                         <div className="p-2">
                           <h3 className="text-xs font-bold text-white truncate">{item.title}</h3>
-                          <p className="text-[10px] text-amber-300 mt-0.5">{normItem.timeAgo}</p>
+                          <p className="text-[10px] text-gray-400 mt-0.5 truncate">
+                            {formatShortLanguage(item.language)} · {normItem.timeAgo}
+                          </p>
                         </div>
                       </div>
                     );
@@ -2506,23 +2516,22 @@ export default function App() {
                         onClick={() => setSelectedMovie(normMovie)}
                         className="rounded-xl overflow-hidden bg-[#121212] border border-white/[0.08] cursor-pointer"
                       >
-                        <div className="relative aspect-[2/3] w-full">
+                        <div className="relative aspect-[2/3] w-full bg-[#050505] overflow-hidden">
                           <img
                             src={entry.movie.poster}
                             alt={entry.movie.title}
                             referrerPolicy="no-referrer"
+                            loading="lazy"
+                            decoding="async"
                             className="w-full h-full object-cover"
                           />
-                          <div className="absolute bottom-0 inset-x-0 bg-black/80 px-2 py-1 text-[10px] text-[#ef4444] font-semibold truncate">
-                            {entry.episodeLabel || 'Movie'} · {formatResumeTime(entry.progressSeconds)}
-                          </div>
                         </div>
                         <div className="p-2">
                           <div className="text-xs font-semibold text-white truncate">
                             {entry.movie.title}
                           </div>
-                          <div className="text-[10px] text-amber-300 mt-0.5">
-                            {normMovie.timeAgo}
+                          <div className="text-[10px] text-gray-400 mt-0.5 truncate">
+                            {entry.episodeLabel || 'Movie'} · {formatResumeTime(entry.progressSeconds)}
                           </div>
                         </div>
                       </div>
@@ -2534,132 +2543,99 @@ export default function App() {
           </main>
         )}
 
-        {/* VIEW 4: FULL-SCREEN MOVIEBOX STYLE "ME" PAGE */}
+        {/* VIEW 4: CLEAN PERSONAL "ME" PAGE (Only Real Working Features — Zero Clutter) */}
         {activeTab === 'me' && (
-          <main className="min-h-screen bg-[#0c0d11] text-white px-3.5 sm:px-6 pt-3 pb-10 max-w-2xl mx-auto space-y-3.5 select-none">
-            {/* Top Bar with Scan Icon */}
-            <div className="flex items-center justify-end py-1">
-              <button
-                type="button"
-                onClick={() => setShowInstallModal(true)}
-                aria-label="Scan or Share"
-                className="p-1.5 text-gray-200 hover:text-white transition-colors"
-              >
-                <ScanLine className="w-6 h-6" />
-              </button>
-            </div>
-
-            {/* Golden Rewards Center Banner */}
-            <div
-              onClick={() => setShowRequestModal(true)}
-              className="rounded-2xl bg-gradient-to-r from-[#2c2112] via-[#5c3d16] to-[#3d2910] border border-amber-500/20 px-4 py-3 flex items-center justify-between cursor-pointer shadow-lg"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-amber-500/20 flex items-center justify-center text-amber-400">
-                  <Star className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="text-xs sm:text-sm font-bold text-white leading-tight">
-                    Rewards Center
-                  </div>
-                  <div className="text-[11px] text-amber-200/80">Win big Prizes!</div>
-                </div>
-              </div>
-              <ChevronRight className="w-4 h-4 text-amber-200/80" />
-            </div>
-
-            {/* Card Group 1: Watch History + My List + Messages (Last 24h) + TV Download & Web Link */}
+          <main className="min-h-screen bg-[#0c0d11] text-white px-3.5 sm:px-6 pt-4 pb-10 max-w-2xl mx-auto space-y-3.5 select-none">
+            {/* Watch History + My List + Last 24h Updates + App Install */}
             <div className="rounded-2xl bg-[#16181e] overflow-hidden shadow-lg">
               {/* Watch History Section */}
               <div className="pt-4 pb-3.5 space-y-3">
-                <div
-                  onClick={() => setActiveTab('watchlist')}
-                  className="px-4 flex items-center justify-between cursor-pointer"
-                >
+                <div className="px-4 flex items-center justify-between">
                   <div className="flex items-center gap-2.5">
                     <History className="w-5 h-5 text-gray-300" />
                     <span className="text-[15px] font-bold text-white">Watch History</span>
                   </div>
-                  <ChevronRight className="w-4 h-4 text-gray-400" />
+                  {continueWatching.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setContinueWatching([])}
+                      className="text-xs font-semibold text-gray-400 hover:text-[#ef4444] transition-colors"
+                    >
+                      Clear
+                    </button>
+                  )}
                 </div>
 
-                {/* Horizontal Landscape Watch History Cards */}
-                <div className="px-4 flex items-start gap-2.5 overflow-x-auto no-scrollbar">
-                  {(continueWatching.length > 0
-                    ? continueWatching.map((entry) => ({
-                        movie: normalizeMovieCardItem(entry.movie),
-                        pct:
-                          entry.durationSeconds && entry.progressSeconds
-                            ? Math.min(
-                                98,
-                                Math.max(
-                                  14,
-                                  Math.round((entry.progressSeconds / entry.durationSeconds) * 100)
-                                )
+                {continueWatching.length > 0 ? (
+                  <div className="px-4 flex items-start gap-2.5 overflow-x-auto no-scrollbar">
+                    {continueWatching.map((entry, idx) => {
+                      const movie = normalizeMovieCardItem(entry.movie);
+                      const pct =
+                        entry.durationSeconds && entry.progressSeconds
+                          ? Math.min(
+                              98,
+                              Math.max(
+                                10,
+                                Math.round((entry.progressSeconds / entry.durationSeconds) * 100)
                               )
-                            : 42,
-                      }))
-                    : heroSlides.slice(0, 6).map((m, i) => ({
-                        movie: m,
-                        pct: [45, 22, 65, 30, 80, 50][i % 6],
-                      }))
-                  ).map(({ movie, pct }, idx) => {
-                    const isSeries =
-                      movie.typeBadge === 'SERIES' ||
-                      movie.typeBadge === 'DRAMA' ||
-                      movie.typeBadge === 'ANIME' ||
-                      Boolean(movie.episodePill);
-                    const cleanTitle = movie.title
-                      .replace(/\s*\(\d{4}\).*$/i, '')
-                      .replace(/\s*(?:1080p|720p|480p|4K|WEB-DL|WEBRip|Full HD|HDTC).*$/i, '')
-                      .trim();
+                            )
+                          : 35;
+                      const isSeries =
+                        movie.typeBadge === 'SERIES' ||
+                        movie.typeBadge === 'DRAMA' ||
+                        movie.typeBadge === 'ANIME' ||
+                        Boolean(movie.episodePill);
+                      const cleanTitle = movie.title
+                        .replace(/\s*\(\d{4}\).*$/i, '')
+                        .replace(/\s*(?:1080p|720p|480p|4K|WEB-DL|WEBRip|Full HD|HDTC).*$/i, '')
+                        .trim();
 
-                    return (
-                      <div
-                        key={movie.path + idx}
-                        onClick={() => setSelectedMovie(movie)}
-                        className="w-[128px] sm:w-[144px] shrink-0 cursor-pointer group"
-                      >
-                        <div className="relative aspect-[16/10] w-full rounded-xl overflow-hidden bg-[#0e1015]">
-                          {movie.poster ? (
-                            <img
-                              src={movie.poster}
-                              alt={movie.title}
-                              referrerPolicy="no-referrer"
-                              loading="lazy"
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                            />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center">
-                              <Film className="w-5 h-5 text-gray-600" />
-                            </div>
-                          )}
-
-                          {/* Top-Left White TV / Film Badge */}
-                          <div className="absolute top-1.5 left-1.5 w-5 h-5 rounded-md bg-white/90 text-[#0c0d11] flex items-center justify-center shadow">
-                            {isSeries ? (
-                              <Tv className="w-3 h-3 stroke-[2.5]" />
+                      return (
+                        <div
+                          key={movie.path + idx}
+                          onClick={() => setSelectedMovie(movie)}
+                          className="w-[128px] sm:w-[144px] shrink-0 cursor-pointer group"
+                        >
+                          <div className="relative aspect-[16/10] w-full rounded-xl overflow-hidden bg-[#0e1015]">
+                            {movie.poster ? (
+                              <img
+                                src={movie.poster}
+                                alt={movie.title}
+                                referrerPolicy="no-referrer"
+                                loading="lazy"
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
                             ) : (
-                              <Film className="w-3 h-3 stroke-[2.5]" />
+                              <div className="w-full h-full flex items-center justify-center">
+                                <Film className="w-5 h-5 text-gray-600" />
+                              </div>
                             )}
+                            <div className="absolute top-1.5 left-1.5 w-5 h-5 rounded-md bg-white/90 text-[#0c0d11] flex items-center justify-center shadow">
+                              {isSeries ? (
+                                <Tv className="w-3 h-3 stroke-[2.5]" />
+                              ) : (
+                                <Film className="w-3 h-3 stroke-[2.5]" />
+                              )}
+                            </div>
+                            <div className="absolute bottom-0 inset-x-0 h-1 bg-black/50">
+                              <div
+                                className="h-full bg-gradient-to-r from-[#00e68a] to-[#12d6df]"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
                           </div>
-
-                          {/* Bottom Green-Cyan Progress Bar */}
-                          <div className="absolute bottom-0 inset-x-0 h-1 bg-black/50">
-                            <div
-                              className="h-full bg-gradient-to-r from-[#00e68a] to-[#12d6df]"
-                              style={{ width: `${pct}%` }}
-                            />
+                          <div className="mt-1.5 text-xs text-gray-300 truncate group-hover:text-white">
+                            {cleanTitle || movie.title}
                           </div>
                         </div>
-
-                        <div className="mt-1.5 text-xs text-gray-300 truncate group-hover:text-white">
-                          {cleanTitle || movie.title}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="px-4 text-xs text-gray-400">
+                    এখনো কোনো মুভি বা সিরিজ দেখা হয়নি। যেকোনো ভিডিও প্লে করলে এখানে সেভ হবে।
+                  </p>
+                )}
               </div>
 
               {/* Row: My List */}
@@ -2678,7 +2654,7 @@ export default function App() {
                 </div>
               </button>
 
-              {/* Row: Messages / Last 24 Hours Updates (Opens 24h drawer ONLY when tapped!) */}
+              {/* Row: Last 24 Hours Updates */}
               <button
                 type="button"
                 onClick={() => setShowRequestModal(true)}
@@ -2687,7 +2663,7 @@ export default function App() {
                 <div className="flex items-center gap-3">
                   <Bell className="w-5 h-5 text-gray-300" />
                   <span className="text-[15px] font-medium text-gray-100">
-                    Messages · Last 24h
+                    Last 24 Hours · নতুন আপলোড
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -2698,117 +2674,19 @@ export default function App() {
                 </div>
               </button>
 
-              {/* Row: TV Download & Web Link */}
+              {/* Row: Install App */}
               <button
                 type="button"
                 onClick={() => setShowInstallModal(true)}
                 className="w-full px-4 py-4 border-t border-white/[0.04] hover:bg-white/[0.03] flex items-center justify-between transition-colors"
               >
                 <div className="flex items-center gap-3">
-                  <Tv className="w-5 h-5 text-gray-300" />
+                  <Download className="w-5 h-5 text-gray-300" />
                   <span className="text-[15px] font-medium text-gray-100">
-                    TV Download & Web Link
+                    Install App (Android / iOS)
                   </span>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="px-1.5 py-0.5 rounded bg-[#e53935] text-white text-[10px] font-extrabold tracking-wide">
-                    NEW
-                  </span>
-                  <ChevronRight className="w-4 h-4 text-gray-400" />
-                </div>
-              </button>
-            </div>
-
-            {/* Card Group 2: Community + My Activity */}
-            <div className="rounded-2xl bg-[#16181e] overflow-hidden shadow-lg">
-              <button
-                type="button"
-                onClick={() => setShowRequestModal(true)}
-                className="w-full px-4 py-4 hover:bg-white/[0.03] flex items-center justify-between transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <Smile className="w-5 h-5 text-gray-300" />
-                  <span className="text-[15px] font-medium text-gray-100">Community</span>
-                </div>
-                <div className="flex items-center gap-1.5 text-sm text-gray-400">
-                  <span>0</span>
-                  <ChevronRight className="w-4 h-4" />
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab('watchlist')}
-                className="w-full px-4 py-4 border-t border-white/[0.04] hover:bg-white/[0.03] flex items-center justify-between transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <MessageCircle className="w-5 h-5 text-gray-300" />
-                  <span className="text-[15px] font-medium text-gray-100">My Activity</span>
-                </div>
-                <div className="flex items-center gap-1.5 text-sm text-gray-400">
-                  <span>{continueWatching.length}</span>
-                  <ChevronRight className="w-4 h-4" />
-                </div>
-              </button>
-            </div>
-
-            {/* Card Group 3: Settings + Study Mode + Feedback */}
-            <div className="rounded-2xl bg-[#16181e] overflow-hidden shadow-lg">
-              <button
-                type="button"
-                onClick={() => setShowInstallModal(true)}
-                className="w-full px-4 py-4 hover:bg-white/[0.03] flex items-center justify-between transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <Settings className="w-5 h-5 text-gray-300" />
-                  <span className="text-[15px] font-medium text-gray-100">Settings</span>
-                </div>
                 <ChevronRight className="w-4 h-4 text-gray-400" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab('categories')}
-                className="w-full px-4 py-4 border-t border-white/[0.04] hover:bg-white/[0.03] flex items-center justify-between transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <GraduationCap className="w-5 h-5 text-gray-300" />
-                  <span className="text-[15px] font-medium text-gray-100">Study Mode</span>
-                </div>
-                <div className="flex items-center gap-1.5 text-sm text-gray-400">
-                  <span>Create Study Profile</span>
-                  <ChevronRight className="w-4 h-4" />
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowRequestModal(true)}
-                className="w-full px-4 py-4 border-t border-white/[0.04] hover:bg-white/[0.03] flex items-center justify-between transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <MessageSquareWarning className="w-5 h-5 text-gray-300" />
-                  <span className="text-[15px] font-medium text-gray-100">Feedback</span>
-                </div>
-                <ChevronRight className="w-4 h-4 text-gray-400" />
-              </button>
-            </div>
-
-            {/* Bottom Official Website & Copy Link */}
-            <div className="pt-2 pb-4 flex items-center justify-center gap-2 text-xs sm:text-sm text-gray-300">
-              <span>Official website: movie-box.co</span>
-              <button
-                type="button"
-                onClick={() => {
-                  try {
-                    navigator.clipboard.writeText(window.location.origin);
-                  } catch {
-                    // ignore
-                  }
-                }}
-                className="text-[#00e68a] font-semibold hover:underline"
-              >
-                Copy link
               </button>
             </div>
           </main>
@@ -2892,7 +2770,7 @@ export default function App() {
             <span className="text-[11px] font-medium mt-1">Downloads</span>
           </button>
 
-          {/* 5. Me (Full-Screen MovieBox Me Page) */}
+          {/* 5. Me */}
           <button
             type="button"
             onClick={() => setActiveTab('me')}
@@ -2900,10 +2778,7 @@ export default function App() {
               activeTab === 'me' ? 'text-[#00e68a]' : 'text-gray-400 hover:text-white'
             }`}
           >
-            <div className="relative">
-              <User className="w-5 h-5" />
-              <span className="w-2 h-2 rounded-full bg-[#e53935] absolute -top-0.5 -right-1" />
-            </div>
+            <User className="w-5 h-5" />
             <span className="text-[11px] font-medium mt-1">Me</span>
           </button>
         </div>
@@ -2930,20 +2805,14 @@ export default function App() {
         onToggleWatchlist={handleToggleWatchlist}
         onRecordWatchProgress={handleRecordWatchProgress}
         onSearchByActor={handleTriggerActorSearch}
-        onOpenReportModal={(prefillTitle) => {
-          setRequestPrefillTitle(prefillTitle);
-          setRequestPrefillType('BROKEN_LINK');
+        onOpenReportModal={() => {
           setShowRequestModal(true);
         }}
       />
 
-      {/* Me Option: Watch History + Collapsible 24h Live 3-Site Upload Button */}
+      {/* Last 24 Hours Live Uploads Drawer */}
       <MovieRequestModal
         isOpen={showRequestModal}
-        initialTitle={requestPrefillTitle}
-        initialType={requestPrefillType}
-        activeNodeId={activeNodeId}
-        onSelectNode={(nodeId) => setActiveNodeId(nodeId)}
         onClose={() => setShowRequestModal(false)}
         last24hItems={last24hItems}
         liveClockNow={liveClockNow}
@@ -2957,119 +2826,7 @@ export default function App() {
           setIsMiniPlayer(false);
           setSelectedMovie(m);
         }}
-        continueWatching={continueWatching}
-        onClearWatchHistory={() => setContinueWatching([])}
       />
-
-      {/* FEATURE 3 MODAL: 🕒 Last 24 Hours Uploaded Movies & Episodes Drawer */}
-      {showLast24hModal && (
-        <div
-          onClick={() => setShowLast24hModal(false)}
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-2xl max-h-[86vh] rounded-t-3xl sm:rounded-3xl bg-[#0a0a0a] border border-white/15 flex flex-col overflow-hidden shadow-2xl"
-          >
-            <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-[#dc2626]/20 border border-[#dc2626]/40 flex items-center justify-center text-[#ef4444]">
-                  <Clock className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="text-base sm:text-lg font-extrabold text-white">
-                    Last 24 Hours · নতুন আপলোড
-                  </h2>
-                  <p className="text-xs text-gray-400">
-                    গত ২৪ ঘণ্টায় আপলোড হওয়া সব নতুন মুভি, সিরিজ ও এপিসোড ({last24hItems.length})
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowLast24hModal(false)}
-                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/15 flex items-center justify-center text-gray-300"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Filter Tabs */}
-            <div className="px-5 py-2.5 bg-[#050505] border-b border-white/5 flex items-center gap-2 overflow-x-auto no-scrollbar">
-              {(
-                [
-                  { id: 'ALL', label: 'All Updates' },
-                  { id: 'MOVIE', label: 'Movies' },
-                  { id: 'SERIES', label: 'Web Series & Drama' },
-                  { id: 'ANIME', label: 'Anime' },
-                ] as const
-              ).map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setLast24hFilter(t.id)}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-colors ${
-                    last24hFilter === t.id
-                      ? 'bg-[#dc2626] text-white'
-                      : 'bg-[#141414] text-gray-300 hover:text-white'
-                  }`}
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
-
-            {/* List of 24h Items */}
-            <div className="p-4 overflow-y-auto divide-y divide-white/5 space-y-1 flex-1">
-              {last24hItems.map((item, idx) => (
-                <button
-                  key={item.path + idx}
-                  type="button"
-                  onMouseEnter={() => prefetchMovieDetails(item.path, item.title, activeNodeId)}
-                  onTouchStart={() => prefetchMovieDetails(item.path, item.title, activeNodeId)}
-                  onClick={() => {
-                    setShowLast24hModal(false);
-                    setSelectedMovie(item);
-                  }}
-                  className="w-full py-2.5 px-2.5 hover:bg-white/5 rounded-2xl flex items-center gap-3.5 text-left transition-colors"
-                >
-                  <span className="w-6 text-xs font-mono font-bold text-gray-500 text-center shrink-0">
-                    {idx + 1}
-                  </span>
-                  <div className="w-12 h-16 rounded-xl overflow-hidden bg-[#050505] shrink-0 border border-white/10">
-                    {item.poster && (
-                      <img
-                        src={item.poster}
-                        alt={item.title}
-                        referrerPolicy="no-referrer"
-                        loading="lazy"
-                        className="w-full h-full object-cover"
-                      />
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-xs sm:text-sm font-bold text-white truncate">
-                      {item.title}
-                    </h3>
-                    <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[11px] text-gray-400">
-                      <span className="text-[#ef4444] font-semibold">
-                        {formatShortLanguage(item.language)}
-                      </span>
-                      <span>·</span>
-                      <span>{item.episodePill || item.quality}</span>
-                      <span>·</span>
-                      <span className="text-amber-300 font-medium">{item.timeAgo}</span>
-                    </div>
-                  </div>
-                  <div className="w-9 h-9 rounded-full bg-[#dc2626]/20 text-[#ef4444] flex items-center justify-center shrink-0">
-                    <Play className="w-4 h-4 fill-current ml-0.5" />
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* iPhone PWA Install Guide Modal */}
       <PWAInstallModal

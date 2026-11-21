@@ -390,6 +390,27 @@ export function deduplicateMovieCards(items: MovieCardItem[]): MovieCardItem[] {
 }
 
 /**
+ * Deduplicates ONLY by exact normalized path (never collapses across MovieBox & MovieLinkBD
+ * or across different seasons/dubs during search).
+ */
+export function deduplicateByExactPath(items: MovieCardItem[]): MovieCardItem[] {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const seenPaths = new Set<string>();
+  const unique: MovieCardItem[] = [];
+  for (const item of items) {
+    if (!item || !item.title) continue;
+    const pathKey = String(item.path || item.url || '')
+      .toLowerCase()
+      .replace(/\/+$/, '')
+      .trim();
+    if (!pathKey || seenPaths.has(pathKey)) continue;
+    seenPaths.add(pathKey);
+    unique.push(item);
+  }
+  return unique;
+}
+
+/**
  * Resolves and anchors the real epoch upload timestamp (`uploadedAtMs`) for a movie card
  * so that `timeAgo` dynamically ticks forward as real time passes!
  */

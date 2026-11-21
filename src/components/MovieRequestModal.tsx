@@ -1,54 +1,19 @@
 import React, { useMemo, useState } from 'react';
 import { Clock, Film, Play, RefreshCw, X } from 'lucide-react';
-import type { MovieCardItem, UserMovieRequest, WatchProgressItem } from '../types/cinema';
+import type { MovieCardItem } from '../types/cinema';
 import { getItemMinutesAgo } from '../utils/timeAgo';
 
 interface MovieRequestModalProps {
   isOpen: boolean;
-  initialTitle?: string;
-  initialType?: UserMovieRequest['type'];
-  activeNodeId: string;
-  onSelectNode: (nodeId: string) => void;
   onClose: () => void;
   last24hItems?: MovieCardItem[];
   liveClockNow?: number;
   isRefreshing24h?: boolean;
   onRefresh24h?: () => void;
   onSelectMovie?: (movie: MovieCardItem) => void;
-  continueWatching?: WatchProgressItem[];
-  onClearWatchHistory?: () => void;
 }
 
-function getUploaderSiteInfo(path?: string): {
-  id: 'MOVIEBOX' | 'MOVIELINKBD' | 'MYFLIX';
-  name: string;
-  uploaderText: string;
-  badgeClass: string;
-} {
-  const p = String(path || '');
-  if (p.startsWith('/mb/')) {
-    return {
-      id: 'MOVIEBOX',
-      name: 'MovieBox HD',
-      uploaderText: 'MovieBox HD',
-      badgeClass: 'bg-emerald-600/90 text-white border-emerald-400/50',
-    };
-  }
-  if (p.startsWith('/mf/')) {
-    return {
-      id: 'MYFLIX',
-      name: 'MyFlixBD',
-      uploaderText: 'MyFlixBD',
-      badgeClass: 'bg-purple-600/90 text-white border-purple-400/50',
-    };
-  }
-  return {
-    id: 'MOVIELINKBD',
-    name: 'MovieLinkBD',
-    uploaderText: 'MovieLinkBD',
-    badgeClass: 'bg-[#dc2626]/90 text-white border-red-400/50',
-  };
-}
+
 
 const EN_TO_BN_DIGITS: Record<string, string> = {
   '0': '০',
@@ -137,35 +102,21 @@ export const MovieRequestModal: React.FC<MovieRequestModalProps> = ({
   onRefresh24h,
   onSelectMovie,
 }) => {
-  const [siteFilter, setSiteFilter] = useState<'ALL' | 'MOVIEBOX' | 'MOVIELINKBD' | 'MYFLIX'>('ALL');
   const [justRefreshed, setJustRefreshed] = useState(false);
 
-  const siteCounts = useMemo(() => {
-    let mb = 0;
-    let mlbd = 0;
-    let mf = 0;
-    for (const item of last24hItems) {
-      const info = getUploaderSiteInfo(item.path);
-      if (info.id === 'MOVIEBOX') mb++;
-      else if (info.id === 'MYFLIX') mf++;
-      else mlbd++;
-    }
-    return { total: last24hItems.length, mb, mlbd, mf };
-  }, [last24hItems]);
+  const cleanItems = useMemo(
+    () => last24hItems.filter((item) => !item.path?.startsWith('/mf/')),
+    [last24hItems]
+  );
 
   const filtered24h = useMemo(() => {
-    const base =
-      siteFilter === 'ALL'
-        ? last24hItems
-        : last24hItems.filter((i) => getUploaderSiteInfo(i.path).id === siteFilter);
-
-    return base
+    return cleanItems
       .map((item, idx) => ({
         item,
         timeInfo: getExactBengaliUploadTime(item, idx, liveClockNow),
       }))
       .sort((a, b) => a.timeInfo.exactMinutesAgo - b.timeInfo.exactMinutesAgo);
-  }, [last24hItems, siteFilter, liveClockNow]);
+  }, [cleanItems, liveClockNow]);
 
   if (!isOpen) return null;
 
@@ -190,10 +141,10 @@ export const MovieRequestModal: React.FC<MovieRequestModalProps> = ({
           <div className="flex items-center gap-2 min-w-0">
             <Clock className="w-4 h-4 text-[#ef4444] shrink-0" />
             <h3 className="text-sm font-extrabold text-white truncate">
-              Last 24 Hours · ৩ সাইটের নতুন আপলোড
+              Last 24 Hours · নতুন আপলোড
             </h3>
             <span className="px-2 py-0.5 rounded-full bg-[#dc2626] text-white text-[10px] font-black font-mono tabular-nums shrink-0">
-              {siteCounts.total}
+              {cleanItems.length}
             </span>
           </div>
 
@@ -219,35 +170,9 @@ export const MovieRequestModal: React.FC<MovieRequestModalProps> = ({
           </div>
         </div>
 
-        {/* 3-Site Filter Buttons (shrink-0 + full height so they are 100% visible and never covered!) */}
-        <div className="shrink-0 flex items-center gap-2 overflow-x-auto no-scrollbar py-3 border-b border-white/[0.06]">
-          {[
-            { id: 'ALL', label: 'সব ৩ সাইট', count: siteCounts.total },
-            { id: 'MOVIEBOX', label: 'MovieBox HD', count: siteCounts.mb },
-            { id: 'MOVIELINKBD', label: 'MovieLinkBD', count: siteCounts.mlbd },
-            { id: 'MYFLIX', label: 'MyFlixBD', count: siteCounts.mf },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setSiteFilter(tab.id as any)}
-              className={`h-9 px-3.5 rounded-xl text-xs font-extrabold whitespace-nowrap shrink-0 flex items-center gap-1.5 border transition-all ${
-                siteFilter === tab.id
-                  ? 'bg-[#dc2626] text-white border-[#ef4444] shadow-[0_2px_10px_rgba(220,38,38,0.4)]'
-                  : 'bg-[#1a1d26] text-gray-200 hover:text-white border-white/10'
-              }`}
-            >
-              <span>{tab.label}</span>
-              <span className="text-[11px] opacity-90 font-mono">({tab.count})</span>
-            </button>
-          ))}
-        </div>
-
-        {/* Scrollable 3-Site Content List (min-h-0 flex-1 with bottom padding so nothing is cut off) */}
+        {/* Scrollable Content List */}
         <div className="min-h-0 flex-1 divide-y divide-white/[0.06] overflow-y-auto pt-1 pb-6 pr-0.5">
           {filtered24h.map(({ item, timeInfo }, idx) => {
-            const site = getUploaderSiteInfo(item.path);
-
             return (
               <button
                 key={`${item.path}-${idx}`}
@@ -267,6 +192,7 @@ export const MovieRequestModal: React.FC<MovieRequestModalProps> = ({
                       alt={item.title}
                       referrerPolicy="no-referrer"
                       loading="lazy"
+                      decoding="async"
                       className="w-full h-full object-cover"
                     />
                   ) : (
@@ -278,11 +204,6 @@ export const MovieRequestModal: React.FC<MovieRequestModalProps> = ({
 
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span
-                      className={`px-1.5 py-0.5 rounded text-[9px] font-extrabold border ${site.badgeClass}`}
-                    >
-                      {site.uploaderText}
-                    </span>
                     <span className="text-[10px] text-amber-300 font-semibold">
                       {timeInfo.clockBn}
                     </span>
